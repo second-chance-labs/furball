@@ -27,7 +27,9 @@ Credentials never appear in `Debug` output or error messages.
 
 ## Fees
 
-Fee type names and rounding come from Kalshi's docs. The formula coefficients are not verified against Kalshi's official schedule; check before relying on them.
+Fee type names and rounding come from Kalshi's docs. The fee schedule builder reads fee types and multipliers from the API.
+
+The base coefficients are not in the API. Kalshi's [fee schedule](https://kalshi.com/fee-schedule) gives a maximum taker fee of $1.75 per 100 contracts for most markets. This matches a taker coefficient of 0.07. The maker coefficients are not confirmed yet. Check the fee schedule before you rely on them.
 
 ## License
 
