@@ -29,7 +29,7 @@ Credentials never appear in `Debug` output or error messages.
 
 Fee type names and rounding come from Kalshi's docs. The fee schedule builder reads fee types and multipliers from the API.
 
-The base coefficients are not in the API. Kalshi's [fee schedule](https://kalshi.com/fee-schedule) gives a maximum taker fee of $1.75 per 100 contracts for most markets. This matches a taker coefficient of 0.07. The maker coefficients are not confirmed yet. Check the fee schedule before you rely on them.
+The base coefficients are not in the API. They come from Kalshi's [fee schedule](https://kalshi.com/fee-schedule): 0.07 for takers and 0.0175 for makers on most markets. On combos, the maker fee is 50% of the taker fee. The `flat` fee formula is not documented.
 
 ## License
 
