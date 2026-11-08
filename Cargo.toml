@@ -1,0 +1,33 @@
+[package]
+name = "furball"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Read-only Rust SDK for Kalshi's Trade API v2: request signing, rate limiting, pagination, live/historical routing"
+repository = "https://github.com/second-chance-labs/furball"
+readme = "README.md"
+keywords = ["kalshi", "prediction-markets", "api-client", "sdk"]
+categories = ["api-bindings"]
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+governor = "0.10"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rsa = "0.9"
+rust_decimal = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time"] }
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+wiremock = "0.6"

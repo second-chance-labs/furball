@@ -1,0 +1,20 @@
+{
+  "series": {
+    "tags": [
+      "Daily temperature"
+    ],
+    "categories": [
+      "Climate and Weather"
+    ],
+    "category": "Climate and Weather",
+    "contract_terms_url": "https://assets.kalshi.com/contract_terms/GLOBALTEMPERATURE.pdf",
+    "contract_url": "https://assets.kalshi.com/regulatory/product-certifications/GLOBALTEMPERATURE.pdf",
+    "exchange_index": 0,
+    "fee_multiplier": 1,
+    "fee_type": "quadratic",
+    "frequency": "daily",
+    "last_updated_ts": "2026-11-03T18:56:57.472494Z",
+    "title": "Highest temperature in NYC",
+    "ticker": "KXHIGHNY"
+  }
+}

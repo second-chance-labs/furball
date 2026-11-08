@@ -1,0 +1,34 @@
+# furball
+
+A read-only Rust SDK for [Kalshi's Trade API v2](https://docs.kalshi.com). No trading endpoints.
+
+- Request signing (RSA-PSS/SHA-256) for authenticated endpoints; public endpoints need no keys.
+- Token-bucket rate limiting sized by account tier, with retry on HTTP 429 (exponential backoff, jitter, `Retry-After`).
+- Cursor pagination as a lazy `Stream`.
+- Transparent routing between live and historical endpoints (markets, candlesticks, trades) using the cached `/historical/cutoff`.
+- Typed responses; money and counts are `rust_decimal::Decimal`, never `f64`.
+- Fee schedule builder: series fees and event overrides as non-overlapping intervals.
+
+```rust,no_run
+use furball::{Client, MarketFilter};
+
+# async fn run() -> furball::Result<()> {
+let client = Client::builder().build()?; // production, Basic tier, no credentials
+let series = client.series("KXHIGHNY").await?;
+let markets = client.markets(&MarketFilter::series("KXHIGHNY"), 100, 1_000).await?;
+println!("{} fee {:?}, {} markets", series.ticker, series.fee_type, markets.len());
+# Ok(())
+# }
+```
+
+Authenticated endpoints (CF Benchmarks passthrough) need credentials:
+`Credentials::from_env()` reads `KALSHI_API_KEY_ID` and the PEM file named by `KALSHI_PRIVATE_KEY_PATH`.
+Credentials never appear in `Debug` output or error messages.
+
+## Fees
+
+Fee type names and rounding come from Kalshi's docs. The formula coefficients are not verified against Kalshi's official schedule; check before relying on them.
+
+## License
+
+MIT
