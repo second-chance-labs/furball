@@ -1,0 +1,87 @@
+{
+  "components": {
+    "common": {
+      "version": "1.2.0",
+      "files": [
+        {
+          "path": "tokenmaxer/scripts/github/common.sh",
+          "sha256": "818bf523158f097a4a4bbaf6eca002762ac9dd5fdd4f4d2ca8e9bdd9356696fc"
+        }
+      ]
+    },
+    "do-issue": {
+      "version": "1.2.0",
+      "files": [
+        {
+          "path": "tokenmaxer/scripts/github/start-issue.sh",
+          "sha256": "926698ab19739cd85f8d6bce2122edee0b3cbe9f73f4bd2017a243721a9765dc"
+        },
+        {
+          "path": "tokenmaxer/scripts/github/create-issue-branch.sh",
+          "sha256": "bfc34db5463ae1efe833d08f5f2b6651d618d9b70cfe6ce6f54af7464d3a1c5f"
+        },
+        {
+          "path": "tokenmaxer/scripts/github/open-pr.sh",
+          "sha256": "12e2200330b787ba2af59127040d4cdc20c6f4814e8471e52a89a9bccd80f56e"
+        },
+        {
+          "path": ".claude/skills/do-issue/SKILL.md",
+          "sha256": "1290d9218574aeec6c1cdadfc955511887af31f6eeff2bc07682e4eb2edb8837"
+        }
+      ]
+    },
+    "do-epic": {
+      "version": "1.2.0",
+      "files": [
+        {
+          "path": "tokenmaxer/scripts/github/get-subissues.sh",
+          "sha256": "57f0631c734506cdb86430d58f6610242e34ef4b232736f3f184c34def1fc157"
+        },
+        {
+          "path": ".claude/skills/do-epic/SKILL.md",
+          "sha256": "8cebe46e5a2cc966181c40674844e2e1b773dee445cd8552b04820bbc4d80dd1"
+        }
+      ]
+    },
+    "do-create-issue": {
+      "version": "1.2.0",
+      "files": [
+        {
+          "path": "tokenmaxer/scripts/github/create-issue.sh",
+          "sha256": "7cc52056c0df15577fe4f6e75d178fa4044a3a7c118f0177b8a5d8062be4ed09"
+        },
+        {
+          "path": ".claude/skills/do-create-issue/SKILL.md",
+          "sha256": "4d8bc74a75b013e786537a6525190609d5ce48e9bd6c8729aa1a60bba93e6701"
+        }
+      ]
+    },
+    "do-create-epic": {
+      "version": "1.2.0",
+      "files": [
+        {
+          "path": "tokenmaxer/scripts/github/create-epic.sh",
+          "sha256": "4ae6c43f0437dce95f84f0b04e30fa6fd68a3ec2dad769bd94d8c651c1119596"
+        },
+        {
+          "path": ".claude/skills/do-create-epic/SKILL.md",
+          "sha256": "2512dfacf7dcb9476b7d2c74456b7a59dbebbcd441eaf75dda167681294d7760"
+        }
+      ]
+    },
+    "do-close-pr": {
+      "version": "1.1.0",
+      "files": [
+        {
+          "path": "tokenmaxer/scripts/github/close-pr.sh",
+          "sha256": "7511f87056f915cf2f8c9d1cde316064c118fa695fdf47e876068539bcc08c6d"
+        },
+        {
+          "path": ".claude/skills/do-close-pr/SKILL.md",
+          "sha256": "bdcb8d75ae03f5c06da7955f3751e3f918570b029035ac2957aeb103f284f36f"
+        }
+      ]
+    }
+  },
+  "source_commit": "fcd3103ff1a71fc0e93b130076814bd5fca2fb36"
+}
