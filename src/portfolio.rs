@@ -1,9 +1,13 @@
 use futures::TryStreamExt;
+use rust_decimal::Decimal;
 
 use crate::client::{Client, Request};
 use crate::error::Result;
+use crate::rate_limit::GET_ORDER_COST;
 use crate::types::{
-    Balance, Positions, PositionsPage, Settlement, SubaccountBalance, SubaccountBalancesResponse,
+    Balance, Order, OrderQueuePosition, OrderQueuePositionResponse, OrderQueuePositionsResponse,
+    OrderResponse, OrderStatus, Positions, PositionsPage, Settlement, SubaccountBalance,
+    SubaccountBalancesResponse,
 };
 
 /// Settlement state filter for portfolio positions.
@@ -89,6 +93,44 @@ impl SettlementFilter {
     }
 }
 
+/// Filters for the order endpoints, live and historical.
+///
+/// `min_ts` and `max_ts` are Unix seconds; a `None` bound is unbounded. When the range spans the
+/// historical cutoff, orders are read from both endpoints and merged.
+#[derive(Debug, Clone, Default)]
+pub struct OrderFilter {
+    /// Market ticker.
+    pub ticker: Option<String>,
+    /// Earliest order update time.
+    pub min_ts: Option<i64>,
+    /// Latest order update time.
+    pub max_ts: Option<i64>,
+    /// Order status; `Resting` reads only the live endpoint, other statuses are filtered
+    /// client-side on the historical leg, which has no `status` parameter.
+    pub status: Option<OrderStatus>,
+    /// Subaccount number; omitted returns all subaccounts.
+    pub subaccount: Option<u32>,
+}
+
+/// Filters for the fills endpoints, live and historical.
+///
+/// `min_ts` and `max_ts` are Unix seconds; a `None` bound is unbounded. When the range spans the
+/// historical cutoff, fills are read from both endpoints and merged.
+#[derive(Debug, Clone, Default)]
+pub struct FillFilter {
+    /// Market ticker.
+    pub ticker: Option<String>,
+    /// Order that produced the fills; the historical endpoint has no `order_id` parameter, so this
+    /// is filtered client-side on the historical leg.
+    pub order_id: Option<String>,
+    /// Earliest fill time.
+    pub min_ts: Option<i64>,
+    /// Latest fill time.
+    pub max_ts: Option<i64>,
+    /// Subaccount number; omitted returns all subaccounts.
+    pub subaccount: Option<u32>,
+}
+
 impl Client {
     /// `GET /portfolio/balance`: balance and portfolio value for the primary account or one
     /// subaccount. Throttled by the portfolio balance bucket, not the Read budget.
@@ -122,6 +164,16 @@ impl Client {
         limit: u32,
         max_items: usize,
     ) -> Result<Positions> {
+        let pages = self.position_pages(filter, limit, max_items).await?;
+        Ok(flatten_pages(pages))
+    }
+
+    pub(crate) async fn position_pages(
+        &self,
+        filter: &PositionFilter,
+        limit: u32,
+        max_items: usize,
+    ) -> Result<Vec<PositionsPage>> {
         let mut pages = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
@@ -149,11 +201,7 @@ impl Client {
             };
             cursor = Some(next.to_owned());
         }
-        let mut positions = Positions::default();
-        for page in pages {
-            positions.extend(page.market_positions, page.event_positions);
-        }
-        Ok(positions)
+        Ok(pages)
     }
 
     /// `GET /portfolio/settlements`: settlement records still in the live data set.
@@ -167,11 +215,57 @@ impl Client {
             .try_collect()
             .await
     }
+
+    /// `GET /portfolio/orders/{order_id}`: one order, live or completed. Costs
+    /// [`GET_ORDER_COST`] tokens.
+    pub async fn get_order(&self, order_id: &str) -> Result<Order> {
+        let request = Request::get(format!("/portfolio/orders/{order_id}"))
+            .cost(GET_ORDER_COST)
+            .authenticated();
+        let response: OrderResponse = self.send(&request).await?;
+        Ok(response.order)
+    }
+
+    /// `GET /portfolio/orders/{order_id}/queue_position`: contracts ahead of one resting order in
+    /// the book, under price-time priority.
+    pub async fn order_queue_position(&self, order_id: &str) -> Result<Decimal> {
+        let request =
+            Request::get(format!("/portfolio/orders/{order_id}/queue_position")).authenticated();
+        let response: OrderQueuePositionResponse = self.send(&request).await?;
+        Ok(response.queue_position_fp)
+    }
+
+    /// `GET /portfolio/orders/queue_positions`: queue positions of all resting orders, optionally
+    /// filtered by market tickers (comma-separated upstream) or one event.
+    pub async fn order_queue_positions(
+        &self,
+        market_tickers: &[&str],
+        event_ticker: Option<&str>,
+        subaccount: Option<u32>,
+    ) -> Result<Vec<OrderQueuePosition>> {
+        let mut request = Request::get("/portfolio/orders/queue_positions")
+            .query_opt("event_ticker", event_ticker)
+            .query_opt("subaccount", subaccount)
+            .authenticated();
+        if !market_tickers.is_empty() {
+            request = request.query("market_tickers", market_tickers.join(","));
+        }
+        let response: OrderQueuePositionsResponse = self.send(&request).await?;
+        Ok(response.queue_positions)
+    }
+}
+
+pub(crate) fn flatten_pages(pages: Vec<PositionsPage>) -> Positions {
+    let mut positions = Positions::default();
+    for page in pages {
+        positions.extend(page.market_positions, page.event_positions);
+    }
+    positions
 }
 
 /// Keeps at most `max_items` positions, in page order: a page's market positions precede its event
 /// positions.
-fn truncate_pages(pages: &mut Vec<PositionsPage>, max_items: usize) {
+pub(crate) fn truncate_pages(pages: &mut Vec<PositionsPage>, max_items: usize) {
     let mut remaining = max_items;
     for page in pages.iter_mut() {
         if remaining == 0 {

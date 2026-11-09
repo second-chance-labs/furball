@@ -11,7 +11,12 @@ const CUTOFF_SECS: i64 = 1_700_000_000;
 
 fn cutoff_body() -> Value {
     let iso = Utc.timestamp_opt(CUTOFF_SECS, 0).unwrap().to_rfc3339();
-    json!({ "market_settled_ts": iso, "trades_created_ts": iso, "orders_updated_ts": iso })
+    json!({
+        "market_settled_ts": iso,
+        "trades_created_ts": iso,
+        "orders_updated_ts": iso,
+        "market_positions_last_updated_ts": iso
+    })
 }
 
 async fn mount_cutoff(server: &MockServer, expected_calls: u64) {
