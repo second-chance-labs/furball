@@ -131,6 +131,42 @@ async fn orders_spanning_cutoff_are_split_merged_and_deduplicated() {
 }
 
 #[tokio::test]
+async fn archived_status_filter_applies_before_the_item_cap() {
+    let server = MockServer::start().await;
+    mount_cutoff(&server, 1).await;
+    Mock::given(method("GET"))
+        .and(path(format!("{API_PREFIX}/historical/orders")))
+        .and(query_param("cursor", "next"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(order_page(vec![order("o2", "canceled")])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{API_PREFIX}/historical/orders")))
+        .and(wiremock::matchers::query_param_is_missing("cursor"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "orders": [order("o1", "executed")],
+            "cursor": "next"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let filter = OrderFilter {
+        max_ts: Some(CUTOFF_SECS - 100),
+        status: Some(OrderStatus::Canceled),
+        ..Default::default()
+    };
+    let orders = client(&server, true)
+        .orders(&filter, 1, 1)
+        .await
+        .expect("orders");
+    let ids: Vec<_> = orders.iter().map(|order| order.order_id.as_str()).collect();
+    assert_eq!(ids, ["o2"]);
+}
+
+#[tokio::test]
 async fn orders_range_touching_cutoff_hits_both_legs() {
     let server = MockServer::start().await;
     mount_cutoff(&server, 1).await;

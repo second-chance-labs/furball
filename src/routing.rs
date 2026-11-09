@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tokio::time::Instant;
@@ -251,16 +251,19 @@ impl Client {
             request =
                 request.query_opt("status", filter.status.as_ref().map(OrderStatus::as_query));
         }
-        let mut orders: Vec<Order> = self
-            .paginate::<Order>(request, "orders", limit, max_items)
+        let archive_status = (!leg.live).then_some(filter.status.as_ref()).flatten();
+        let cap = if archive_status.is_some() {
+            usize::MAX
+        } else {
+            max_items
+        };
+        self.paginate::<Order>(request, "orders", limit, cap)
+            .try_filter(|order| {
+                std::future::ready(archive_status.is_none_or(|status| order.status == *status))
+            })
+            .take(max_items)
             .try_collect()
-            .await?;
-        if !leg.live
-            && let Some(status) = filter.status.as_ref()
-        {
-            orders.retain(|order| order.status == *status);
-        }
-        Ok(orders)
+            .await
     }
 
     /// Fetches fills matching `filter`, splitting at the historical cutoff between
@@ -332,16 +335,19 @@ impl Client {
         if leg.live {
             request = request.query_opt("order_id", filter.order_id.as_deref());
         }
-        let mut fills: Vec<Fill> = self
-            .paginate::<Fill>(request, "fills", limit, max_items)
+        let archive_order_id = (!leg.live).then_some(filter.order_id.as_deref()).flatten();
+        let cap = if archive_order_id.is_some() {
+            usize::MAX
+        } else {
+            max_items
+        };
+        self.paginate::<Fill>(request, "fills", limit, cap)
+            .try_filter(|fill| {
+                std::future::ready(archive_order_id.is_none_or(|id| fill.order_id == id))
+            })
+            .take(max_items)
             .try_collect()
-            .await?;
-        if !leg.live
-            && let Some(order_id) = filter.order_id.as_deref()
-        {
-            fills.retain(|fill| fill.order_id == order_id);
-        }
-        Ok(fills)
+            .await
     }
 
     /// Fetches the complete position history of one subaccount: live
