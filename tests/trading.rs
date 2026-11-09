@@ -1072,3 +1072,212 @@ async fn write_attempts_are_logged_without_credentials() {
     assert!(!recorded.contains(KEY_ID));
     assert!(!recorded.contains("PRIVATE KEY"));
 }
+
+fn fixture_value(name: &str) -> Value {
+    let file = format!("{}/tests/fixtures/{name}.json", env!("CARGO_MANIFEST_DIR"));
+    serde_json::from_str(&std::fs::read_to_string(file).expect("fixture")).expect("fixture json")
+}
+
+#[tokio::test]
+async fn create_order_group_sends_the_limit_and_decodes_the_fixture() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let fixture = fixture_value("order_group");
+    let response_fixture = fixture.clone();
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/order_groups/create")))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let body_ok = body["contracts_limit_fp"] == "50.00"
+                && body["subaccount"] == 0
+                && body["exchange_index"] == 1;
+            if body_ok {
+                ResponseTemplate::new(201).set_body_json(response_fixture.clone())
+            } else {
+                ResponseTemplate::new(400)
+            }
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    let group = furball::NewOrderGroup {
+        contracts_limit_fp: "50.00".parse().expect("decimal"),
+        subaccount: Some(0),
+        exchange_index: Some(1),
+    };
+    match client.create_order_group(&group).await.expect("created") {
+        WriteOutcome::Sent(created) => {
+            let expected: furball::OrderGroup = serde_json::from_value(fixture).expect("decode");
+            assert_eq!(created, expected);
+            assert_eq!(created.order_group_id, "g-123");
+            assert_eq!(created.subaccount, 0);
+            assert_eq!(created.exchange_index, Some(1));
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn delete_order_group_sends_a_signed_delete() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let fixture = fixture_value("empty");
+    Mock::given(method("DELETE"))
+        .and(path(format!("{API_PREFIX}/portfolio/order_groups/g-123")))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let valid = verify(
+                &header(furball::ACCESS_TIMESTAMP_HEADER),
+                "DELETE",
+                &format!("{API_PREFIX}/portfolio/order_groups/g-123"),
+                &header(furball::ACCESS_SIGNATURE_HEADER),
+            );
+            ResponseTemplate::new(if valid { 200 } else { 401 }).set_body_json(fixture.clone())
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    match client.delete_order_group("g-123").await.expect("deleted") {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn reset_order_group_sends_a_signed_put() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let fixture = fixture_value("empty");
+    Mock::given(method("PUT"))
+        .and(path(format!(
+            "{API_PREFIX}/portfolio/order_groups/g-123/reset"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    match client.reset_order_group("g-123").await.expect("reset") {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn trigger_order_group_sends_a_signed_put() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let fixture = fixture_value("empty");
+    Mock::given(method("PUT"))
+        .and(path(format!(
+            "{API_PREFIX}/portfolio/order_groups/g-123/trigger"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    match client
+        .trigger_order_group("g-123")
+        .await
+        .expect("triggered")
+    {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn update_order_group_limit_sends_the_new_limit() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let fixture = fixture_value("empty");
+    Mock::given(method("PUT"))
+        .and(path(format!(
+            "{API_PREFIX}/portfolio/order_groups/g-123/limit"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let single_field = body.as_object().is_some_and(|map| map.len() == 1);
+            let body_ok = body["contracts_limit_fp"] == "75.00" && single_field;
+            if body_ok {
+                ResponseTemplate::new(200).set_body_json(fixture.clone())
+            } else {
+                ResponseTemplate::new(400)
+            }
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    let limit = "75.00".parse::<Decimal>().expect("decimal");
+    match client
+        .update_order_group_limit("g-123", &limit)
+        .await
+        .expect("updated")
+    {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn order_builder_attaches_orders_to_a_group() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let fixture = fixture_value("order_group");
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/order_groups/create")))
+        .respond_with(ResponseTemplate::new(201).set_body_json(fixture))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    let created = match client
+        .create_order_group(&furball::NewOrderGroup {
+            contracts_limit_fp: 50.into(),
+            subaccount: None,
+            exchange_index: None,
+        })
+        .await
+        .expect("created")
+    {
+        WriteOutcome::Sent(created) => created,
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    };
+
+    let order = OrderBuilder::new(
+        "KXUPDOWN-25DEC",
+        OrderSide::Bid,
+        1.into(),
+        "0.55".parse().expect("price"),
+        TimeInForce::GoodTillCanceled,
+        SelfTradePrevention::TakerAtCross,
+    )
+    .order_group_id(created.order_group_id)
+    .build();
+    let body = serde_json::to_value(&order).expect("serialize");
+    assert_eq!(body["order_group_id"], "g-123");
+    assert_eq!(server.received_requests().await.expect("log").len(), 1);
+}

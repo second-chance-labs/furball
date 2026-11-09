@@ -52,6 +52,6 @@ pub use routing::{Cutoff, TradeId};
 pub use trading::{
     AmendOrder, AmendedOrder, BatchCancelOrder, BatchCancelResult, BatchCreateResult,
     BatchItemError, CancelledOrder, CreateOrderV2, DecreaseAmount, DecreasedOrder, DryRun,
-    Environment, Order, OrderBuilder, OrderSide, SelfTradePrevention, TimeInForce, TradingClient,
-    TradingClientBuilder, WriteOutcome,
+    Environment, NewOrderGroup, Order, OrderBuilder, OrderGroup, OrderSide, SelfTradePrevention,
+    TimeInForce, TradingClient, TradingClientBuilder, WriteOutcome,
 };
