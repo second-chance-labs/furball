@@ -2,7 +2,7 @@
 
 A read-only Rust SDK for [Kalshi's Trade API v2](https://docs.kalshi.com). No trading endpoints.
 
-- Request signing (RSA-PSS/SHA-256) for authenticated endpoints; public endpoints need no keys.
+- Request signing (Ed25519 or RSA-PSS/SHA-256, detected from the PEM key) for authenticated endpoints; public endpoints need no keys.
 - Token-bucket rate limiting sized by account tier, with retry on HTTP 429 (exponential backoff, jitter, `Retry-After`).
 - Cursor pagination as a lazy `Stream`.
 - Transparent routing between live and historical endpoints (markets, candlesticks, trades) using the cached `/historical/cutoff`.

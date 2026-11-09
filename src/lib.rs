@@ -23,7 +23,7 @@ pub mod types;
 
 pub use auth::{
     ACCESS_KEY_HEADER, ACCESS_SIGNATURE_HEADER, ACCESS_TIMESTAMP_HEADER, Credentials, KEY_ID_ENV,
-    PRIVATE_KEY_PATH_ENV, SignedHeaders,
+    KeyType, PRIVATE_KEY_PATH_ENV, SignedHeaders,
 };
 pub use client::{
     Client, ClientBuilder, DEMO_URL, MAX_ATTEMPTS, PRODUCTION_EXTERNAL_URL, PRODUCTION_URL, Request,
