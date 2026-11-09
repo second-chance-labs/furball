@@ -30,6 +30,12 @@ fn optional_decimal_from_number<'de, D: Deserializer<'de>>(
     Ok(Option::<Wrapper>::deserialize(deserializer)?.map(|wrapper| wrapper.0))
 }
 
+/// Decodes a fixed-point decimal string into a [`Decimal`].
+fn decimal_from_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Decimal, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    text.parse().map_err(serde::de::Error::custom)
+}
+
 /// How Kalshi computes trading fees for a series or event override.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(from = "String", into = "String")]
@@ -230,6 +236,26 @@ pub struct Market {
     pub volume_24h_fp: Decimal,
     /// Open interest in contracts.
     pub open_interest_fp: Decimal,
+    /// Tick-size structure name (`linear_cent`, `linear_mill`, ...); absent on some payloads.
+    #[serde(default)]
+    pub price_level_structure: Option<String>,
+    /// Tick size per price range (`start`, `end`, `step`); may accompany any structure.
+    #[serde(default)]
+    pub price_ranges: Option<Vec<PriceRange>>,
+}
+
+/// One entry of a market's `price_ranges`: the tick size between two prices.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PriceRange {
+    /// Inclusive lower bound, in dollars.
+    #[serde(deserialize_with = "decimal_from_string")]
+    pub start: Decimal,
+    /// Inclusive upper bound, in dollars.
+    #[serde(deserialize_with = "decimal_from_string")]
+    pub end: Decimal,
+    /// Tick size between the bounds, in dollars.
+    #[serde(deserialize_with = "decimal_from_string")]
+    pub step: Decimal,
 }
 
 /// Response of `GET /markets/{ticker}` and `GET /historical/markets/{ticker}`.
