@@ -10,24 +10,22 @@
 //! ```rust,no_run
 //! # async fn run() -> furball::Result<()> {
 //! use furball::{
-//!     Credentials, NewOrder, OrderSide, SelfTradePrevention, TimeInForce, TradingClient,
+//!     Credentials, OrderBuilder, OrderSide, SelfTradePrevention, TimeInForce, TradingClient,
 //! };
 //!
 //! let client = TradingClient::builder()
 //!     .credentials(Credentials::from_env()?)
 //!     .build()?; // demo environment, real writes
 //!
-//! let order = NewOrder {
-//!     ticker: "KXUPDOWN-25DEC".into(),
-//!     side: OrderSide::Bid,
-//!     count: 1.into(),
-//!     price: "0.55".parse().expect("price"),
-//!     time_in_force: TimeInForce::GoodTillCanceled,
-//!     self_trade_prevention_type: SelfTradePrevention::TakerAtCross,
-//!     client_order_id: Some("my-order-1".into()),
-//!     post_only: None,
-//!     reduce_only: None,
-//! };
+//! let order = OrderBuilder::new(
+//!     "KXUPDOWN-25DEC",
+//!     OrderSide::Bid,
+//!     1.into(),
+//!     "0.55".parse().expect("price"),
+//!     TimeInForce::GoodTillCanceled,
+//!     SelfTradePrevention::TakerAtCross,
+//! )
+//! .build();
 //! let _ = client.create_order(&order).await?;
 //! # Ok(())
 //! # }
@@ -37,6 +35,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use rand::Rng;
 use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -210,8 +209,9 @@ impl TradingClient {
     /// `POST /portfolio/events/orders`: create one order.
     ///
     /// With `client_order_id` set the request is marked idempotent (safe to retry); without it a
-    /// failure after dispatch surfaces as [`KalshiError::Ambiguous`].
-    pub async fn create_order(&self, order: &NewOrder) -> Result<WriteOutcome<Order>> {
+    /// failure after dispatch surfaces as [`KalshiError::Ambiguous`]. [`OrderBuilder`] supplies a
+    /// generated id unless told not to.
+    pub async fn create_order(&self, order: &CreateOrderV2) -> Result<WriteOutcome<Order>> {
         let mut request = Request::post("/portfolio/events/orders")
             .body(order)
             .authenticated();
@@ -328,8 +328,10 @@ pub enum SelfTradePrevention {
 }
 
 /// A new order for `POST /portfolio/events/orders`.
-#[derive(Debug, Clone, Serialize)]
-pub struct NewOrder {
+///
+/// Build one with [`OrderBuilder`]; its required fields cannot be omitted.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CreateOrderV2 {
     /// Market ticker.
     pub ticker: String,
     /// Side.
@@ -344,7 +346,8 @@ pub struct NewOrder {
     pub time_in_force: TimeInForce,
     /// Self-trade prevention mode.
     pub self_trade_prevention_type: SelfTradePrevention,
-    /// Caller-chosen idempotency key; makes the create safe to retry.
+    /// Idempotency key; makes the create safe to retry. [`OrderBuilder`] generates one by
+    /// default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_order_id: Option<String>,
     /// Post-only: joins the book or is rejected.
@@ -353,6 +356,155 @@ pub struct NewOrder {
     /// Reduce-only: capped at the current position.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reduce_only: Option<bool>,
+    /// Expiration time, Unix milliseconds; the order is canceled at or after it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiration_time: Option<i64>,
+    /// Subaccount number, 0 for the primary account; omitted uses the key's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subaccount: Option<u32>,
+    /// Order group this order joins.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order_group_id: Option<String>,
+    /// Exchange shard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exchange_index: Option<u32>,
+}
+
+/// Builder for [`CreateOrderV2`]. The fields Kalshi requires are constructor arguments and
+/// cannot be omitted; the rest are optional setters. A random `client_order_id` is assigned at
+/// [`Self::build`] unless [`Self::client_order_id`] or [`Self::without_client_order_id`] is
+/// called, so a built order is safe to retry by default.
+#[derive(Debug, Clone)]
+pub struct OrderBuilder {
+    ticker: String,
+    side: OrderSide,
+    count: Decimal,
+    price: Decimal,
+    time_in_force: TimeInForce,
+    self_trade_prevention: SelfTradePrevention,
+    client_order_id: Option<Option<String>>,
+    post_only: Option<bool>,
+    reduce_only: Option<bool>,
+    expiration_time: Option<i64>,
+    subaccount: Option<u32>,
+    order_group_id: Option<String>,
+    exchange_index: Option<u32>,
+}
+
+impl OrderBuilder {
+    /// Starts a builder with the required fields: market ticker, side, contract count, limit
+    /// price, time in force, and self-trade prevention mode.
+    pub fn new(
+        ticker: impl Into<String>,
+        side: OrderSide,
+        count: Decimal,
+        price: Decimal,
+        time_in_force: TimeInForce,
+        self_trade_prevention: SelfTradePrevention,
+    ) -> Self {
+        Self {
+            ticker: ticker.into(),
+            side,
+            count,
+            price,
+            time_in_force,
+            self_trade_prevention,
+            client_order_id: None,
+            post_only: None,
+            reduce_only: None,
+            expiration_time: None,
+            subaccount: None,
+            order_group_id: None,
+            exchange_index: None,
+        }
+    }
+
+    /// Sets the caller's own idempotency key.
+    pub fn client_order_id(mut self, client_order_id: impl Into<String>) -> Self {
+        self.client_order_id = Some(Some(client_order_id.into()));
+        self
+    }
+
+    /// Sends no `client_order_id`: the create is not safe to retry, and a failure after
+    /// dispatch surfaces as [`KalshiError::Ambiguous`] instead of a plain error.
+    pub fn without_client_order_id(mut self) -> Self {
+        self.client_order_id = Some(None);
+        self
+    }
+
+    /// Post-only: joins the book or is rejected.
+    pub fn post_only(mut self, post_only: bool) -> Self {
+        self.post_only = Some(post_only);
+        self
+    }
+
+    /// Reduce-only: capped at the current position.
+    pub fn reduce_only(mut self, reduce_only: bool) -> Self {
+        self.reduce_only = Some(reduce_only);
+        self
+    }
+
+    /// Expiration time, Unix milliseconds; the order is canceled at or after it.
+    pub fn expiration_time(mut self, expiration_time: i64) -> Self {
+        self.expiration_time = Some(expiration_time);
+        self
+    }
+
+    /// Subaccount number, 0 for the primary account; omitted uses the key's default.
+    pub fn subaccount(mut self, subaccount: u32) -> Self {
+        self.subaccount = Some(subaccount);
+        self
+    }
+
+    /// Order group this order joins.
+    pub fn order_group_id(mut self, order_group_id: impl Into<String>) -> Self {
+        self.order_group_id = Some(order_group_id.into());
+        self
+    }
+
+    /// Exchange shard.
+    pub fn exchange_index(mut self, exchange_index: u32) -> Self {
+        self.exchange_index = Some(exchange_index);
+        self
+    }
+
+    /// Builds the request, generating a random `client_order_id` when none was set.
+    pub fn build(self) -> CreateOrderV2 {
+        CreateOrderV2 {
+            ticker: self.ticker,
+            side: self.side,
+            count: self.count,
+            price: self.price,
+            time_in_force: self.time_in_force,
+            self_trade_prevention_type: self.self_trade_prevention,
+            client_order_id: self
+                .client_order_id
+                .unwrap_or_else(|| Some(random_client_order_id())),
+            post_only: self.post_only,
+            reduce_only: self.reduce_only,
+            expiration_time: self.expiration_time,
+            subaccount: self.subaccount,
+            order_group_id: self.order_group_id,
+            exchange_index: self.exchange_index,
+        }
+    }
+}
+
+/// A version-4 UUID formatted as a client order id.
+fn random_client_order_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill(&mut bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: Vec<String> = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        hex[0..4].join(""),
+        hex[4..6].join(""),
+        hex[6..8].join(""),
+        hex[8..10].join(""),
+        hex[10..16].join("")
+    )
 }
 
 fn decimal_as_string<S: serde::Serializer>(
