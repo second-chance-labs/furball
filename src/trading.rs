@@ -334,6 +334,68 @@ impl TradingClient {
         })
     }
 
+    /// `POST /portfolio/order_groups/create`: create an order group with a contracts limit
+    /// measured over a rolling 15-second window. When the limit is hit, all orders in the group
+    /// are canceled and no new orders can be placed until the group is reset.
+    pub async fn create_order_group(
+        &self,
+        group: &NewOrderGroup,
+    ) -> Result<WriteOutcome<OrderGroup>> {
+        let request = Request::post("/portfolio/order_groups/create")
+            .body(group)
+            .authenticated();
+        self.write(request, String::new(), None).await
+    }
+
+    /// `DELETE /portfolio/order_groups/{order_group_id}`: delete an order group and cancel all
+    /// orders within it. Idempotent.
+    pub async fn delete_order_group(&self, order_group_id: &str) -> Result<WriteOutcome<()>> {
+        self.write_empty(
+            Request::delete(format!("/portfolio/order_groups/{order_group_id}")).authenticated(),
+            String::new(),
+            None,
+        )
+        .await
+    }
+
+    /// `PUT /portfolio/order_groups/{order_group_id}/reset`: reset the group's rolling limit so
+    /// new orders can be placed again. Idempotent.
+    pub async fn reset_order_group(&self, order_group_id: &str) -> Result<WriteOutcome<()>> {
+        self.write_empty(
+            Request::put(format!("/portfolio/order_groups/{order_group_id}/reset")).authenticated(),
+            String::new(),
+            None,
+        )
+        .await
+    }
+
+    /// `PUT /portfolio/order_groups/{order_group_id}/trigger`: cancel all of the group's orders
+    /// immediately, as if the limit had been hit. Idempotent.
+    pub async fn trigger_order_group(&self, order_group_id: &str) -> Result<WriteOutcome<()>> {
+        self.write_empty(
+            Request::put(format!("/portfolio/order_groups/{order_group_id}/trigger"))
+                .authenticated(),
+            String::new(),
+            None,
+        )
+        .await
+    }
+
+    /// `PUT /portfolio/order_groups/{order_group_id}/limit`: change the group's rolling contracts
+    /// limit. Idempotent.
+    pub async fn update_order_group_limit(
+        &self,
+        order_group_id: &str,
+        contracts_limit: &Decimal,
+    ) -> Result<WriteOutcome<()>> {
+        let request = Request::put(format!("/portfolio/order_groups/{order_group_id}/limit"))
+            .body(UpdateOrderGroupLimitBody {
+                contracts_limit_fp: *contracts_limit,
+            })
+            .authenticated();
+        self.write_empty(request, String::new(), None).await
+    }
+
     async fn write<T: DeserializeOwned>(
         &self,
         request: Request,
@@ -938,4 +1000,40 @@ fn item_error_code<'de, D: serde::Deserializer<'de>>(
             "error code is not a number: {other:?}"
         ))),
     }
+}
+
+/// Fields for `POST /portfolio/order_groups/create`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NewOrderGroup {
+    /// Maximum number of contracts that can be matched within the group over a rolling
+    /// 15-second window, sent as a fixed-point string.
+    #[serde(serialize_with = "decimal_as_string")]
+    pub contracts_limit_fp: Decimal,
+    /// Subaccount that owns the group, 0 for the primary account; omitted uses the key's
+    /// default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subaccount: Option<u32>,
+    /// Exchange shard; defaults to 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exchange_index: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct UpdateOrderGroupLimitBody {
+    #[serde(serialize_with = "decimal_as_string")]
+    contracts_limit_fp: Decimal,
+}
+
+/// An order group, as returned by `POST /portfolio/order_groups/create`.
+///
+/// Attach orders to a group with [`OrderBuilder::order_group_id`].
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OrderGroup {
+    /// Unique identifier of the order group.
+    pub order_group_id: String,
+    /// Subaccount that owns the group, 0 for the primary account.
+    pub subaccount: u32,
+    /// Exchange shard, when present.
+    #[serde(default)]
+    pub exchange_index: Option<u32>,
 }
