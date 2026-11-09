@@ -10,10 +10,12 @@ use chrono::TimeZone;
 use common::{API_PREFIX, KEY_ID, client, credentials, verify_rsa as verify};
 use furball::types::OutcomeSide;
 use furball::{
-    AcceptRfqBatch, AcceptedRfqBatch, AcceptedSide, CreatedRfqBatchQuote, KalshiError, NewQuote,
-    NewRfq, NewRfqBatch, NewRfqBatchQuote, Quote, QuoteFilter, QuoteStatus, Rfq, RfqBatch,
-    RfqBatchAcceptLimit, RfqBatchChild, RfqBatchQuoteEntry, RfqBatchSize, RfqBatchStatus,
-    RfqChildSize, RfqFilter, RfqSize, RfqStatus, TickerPair, TradingClient, WriteOutcome,
+    AcceptBlockTradeProposal, AcceptRfqBatch, AcceptedRfqBatch, AcceptedSide, BlockTradeProposal,
+    BlockTradeProposalFilter, BlockTradeProposalStatus, CreatedBlockTradeProposal,
+    CreatedRfqBatchQuote, KalshiError, NewQuote, NewRfq, NewRfqBatch, NewRfqBatchQuote,
+    ProposeBlockTrade, Quote, QuoteFilter, QuoteStatus, Rfq, RfqBatch, RfqBatchAcceptLimit,
+    RfqBatchChild, RfqBatchQuoteEntry, RfqBatchSize, RfqBatchStatus, RfqChildSize, RfqFilter,
+    RfqSize, RfqStatus, TickerPair, TradingClient, WriteOutcome,
 };
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
@@ -25,6 +27,7 @@ const QUOTE_ID: &str = "0191f2c5-1b4c-8e2f-9d6a-3b7c5f9e0a12";
 const RFQ_BATCH_ID: &str = "0191f2c6-2c5d-8f3a-9e7b-4c8d6a0f1b23";
 const RFQ_ID_2: &str = "0191f2c7-3d6e-9a4b-8f8c-5d9e7b1a2c34";
 const BATCH_QUOTE_ID: &str = "0191f2c9-5f8a-bc6d-aab0-7fb09d3c4e56";
+const PROPOSAL_ID: &str = "btp-1000";
 
 fn fixture(name: &str) -> Value {
     let file = format!("{}/tests/fixtures/{name}.json", env!("CARGO_MANIFEST_DIR"));
@@ -143,6 +146,29 @@ fn accept_rfq_batch() -> AcceptRfqBatch {
         ],
         client_order_id: Some("co-1".into()),
     }
+}
+
+fn new_block_trade_proposal() -> ProposeBlockTrade {
+    ProposeBlockTrade {
+        buyer_user_id: "user-buyer-1".into(),
+        buyer_subtrader_id: None,
+        buyer_subaccount: Some(2),
+        seller_user_id: "user-seller-1".into(),
+        seller_subtrader_id: None,
+        seller_subaccount: None,
+        market_ticker: "KXAPRIL-25FEB-YES".into(),
+        price_centi_cents: 5400,
+        centicount: 100000,
+        maker_side: OutcomeSide::Yes,
+        expiration_ts: chrono::Utc.with_ymd_and_hms(2025, 2, 11, 12, 0, 0).unwrap(),
+    }
+}
+
+/// One block trade proposal fixture with a different id, for pagination tests.
+fn block_trade_proposal_with_id(id: &str) -> Value {
+    let mut value = fixture("block_trade_proposal");
+    value["id"] = json!(id);
+    value
 }
 
 static WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1501,4 +1527,481 @@ async fn dry_run_batch_writes_bill_each_child() {
         WriteOutcome::Sent(_) => panic!("dry run must not send"),
     }
     assert!(server.received_requests().await.expect("log").is_empty());
+}
+
+#[test]
+fn propose_block_trade_serializes_required_and_optional_fields() {
+    let value = serde_json::to_value(new_block_trade_proposal()).expect("serialize");
+    assert_eq!(value["buyer_user_id"], "user-buyer-1");
+    assert_eq!(value["buyer_subaccount"], 2);
+    assert!(value.get("buyer_subtrader_id").is_none());
+    assert_eq!(value["seller_user_id"], "user-seller-1");
+    assert!(value.get("seller_subtrader_id").is_none());
+    assert!(value.get("seller_subaccount").is_none());
+    assert_eq!(value["market_ticker"], "KXAPRIL-25FEB-YES");
+    assert_eq!(value["price_centi_cents"], 5400);
+    assert_eq!(value["centicount"], 100000);
+    assert_eq!(value["maker_side"], "yes");
+    assert_eq!(value["expiration_ts"], "2025-02-11T12:00:00Z");
+
+    let mut with_subtraders = new_block_trade_proposal();
+    with_subtraders.buyer_subaccount = None;
+    with_subtraders.buyer_subtrader_id = Some("st-buyer-1".into());
+    with_subtraders.seller_subaccount = Some(3);
+    with_subtraders.maker_side = OutcomeSide::No;
+    let value = serde_json::to_value(&with_subtraders).expect("serialize");
+    assert_eq!(value["buyer_subtrader_id"], "st-buyer-1");
+    assert!(value.get("buyer_subaccount").is_none());
+    assert_eq!(value["seller_subaccount"], 3);
+    assert_eq!(value["maker_side"], "no");
+}
+
+#[test]
+fn accept_block_trade_proposal_serializes_the_booking() {
+    let none: AcceptBlockTradeProposal = AcceptBlockTradeProposal::default();
+    assert_eq!(serde_json::to_value(&none).expect("serialize"), json!({}));
+
+    let subaccount = AcceptBlockTradeProposal {
+        subtrader_id: None,
+        subaccount: Some(4),
+    };
+    let value = serde_json::to_value(&subaccount).expect("serialize");
+    assert_eq!(value["subaccount"], 4);
+    assert!(value.get("subtrader_id").is_none());
+
+    let subtrader = AcceptBlockTradeProposal {
+        subtrader_id: Some("st-1".into()),
+        subaccount: None,
+    };
+    let value = serde_json::to_value(&subtrader).expect("serialize");
+    assert_eq!(value["subtrader_id"], "st-1");
+    assert!(value.get("subaccount").is_none());
+}
+
+#[test]
+fn block_trade_proposal_status_round_trips() {
+    let pending: BlockTradeProposalStatus = serde_json::from_value(json!("pending")).expect("p");
+    let executed: BlockTradeProposalStatus = serde_json::from_value(json!("executed")).expect("e");
+    let cancelled: BlockTradeProposalStatus =
+        serde_json::from_value(json!("cancelled")).expect("c");
+    let rejected: BlockTradeProposalStatus = serde_json::from_value(json!("rejected")).expect("r");
+    let unknown: BlockTradeProposalStatus = serde_json::from_value(json!("weird")).expect("u");
+    assert_eq!(pending, BlockTradeProposalStatus::Pending);
+    assert_eq!(executed, BlockTradeProposalStatus::Executed);
+    assert_eq!(cancelled, BlockTradeProposalStatus::Cancelled);
+    assert_eq!(rejected, BlockTradeProposalStatus::Rejected);
+    assert_eq!(unknown, BlockTradeProposalStatus::Other("weird".into()));
+}
+
+#[test]
+fn block_trade_proposal_fixture_decodes_every_field() {
+    let proposal: BlockTradeProposal =
+        serde_json::from_value(fixture("block_trade_proposal")).expect("decode");
+    assert_eq!(proposal.proposal_id, PROPOSAL_ID);
+    assert_eq!(proposal.proposer_user_id, "user-proposer-1");
+    assert_eq!(proposal.buyer_user_id, "user-buyer-1");
+    assert_eq!(proposal.buyer_subtrader_id, Some("st-buyer-1".into()));
+    assert_eq!(proposal.seller_user_id, "user-seller-1");
+    assert_eq!(proposal.seller_subtrader_id, Some("st-seller-1".into()));
+    assert_eq!(proposal.market_ticker, "KXAPRIL-25FEB-YES");
+    assert_eq!(proposal.price_centi_cents, 5400);
+    assert_eq!(proposal.centicount, 100000);
+    assert_eq!(proposal.maker_side, OutcomeSide::Yes);
+    assert_eq!(
+        proposal.expiration_ts,
+        chrono::Utc.with_ymd_and_hms(2025, 2, 11, 12, 0, 0).unwrap()
+    );
+    assert_eq!(proposal.status, BlockTradeProposalStatus::Executed);
+    assert_eq!(
+        proposal.created_ts,
+        chrono::Utc.with_ymd_and_hms(2025, 2, 11, 10, 0, 0).unwrap()
+    );
+    assert_eq!(
+        proposal.updated_ts,
+        chrono::Utc
+            .with_ymd_and_hms(2025, 2, 11, 10, 30, 0)
+            .unwrap()
+    );
+    assert!(proposal.buyer_accepted);
+    assert!(proposal.seller_accepted);
+    assert_eq!(
+        proposal.buyer_accepted_ts,
+        Some(
+            chrono::Utc
+                .with_ymd_and_hms(2025, 2, 11, 10, 10, 0)
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        proposal.seller_accepted_ts,
+        Some(
+            chrono::Utc
+                .with_ymd_and_hms(2025, 2, 11, 10, 20, 0)
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        proposal.executed_ts,
+        Some(
+            chrono::Utc
+                .with_ymd_and_hms(2025, 2, 11, 10, 30, 0)
+                .unwrap()
+        )
+    );
+    assert_eq!(proposal.buyer_order_id, Some("o-block-buyer-1".into()));
+    assert_eq!(proposal.seller_order_id, Some("o-block-seller-1".into()));
+}
+
+#[test]
+fn block_trade_proposal_missing_optional_fields_defaults() {
+    let minimal: BlockTradeProposal = serde_json::from_value(json!({
+        "id": "btp-min",
+        "proposer_user_id": "p1",
+        "buyer_user_id": "b1",
+        "seller_user_id": "s1",
+        "market_ticker": "KX-1-YES",
+        "price_centi_cents": 1,
+        "centicount": 1,
+        "maker_side": "no",
+        "expiration_ts": "2025-02-11T12:00:00Z",
+        "status": "pending",
+        "created_ts": "2025-02-11T10:00:00Z",
+        "updated_ts": "2025-02-11T10:00:00Z",
+        "buyer_accepted": false,
+        "seller_accepted": false
+    }))
+    .expect("decode");
+    assert_eq!(minimal.proposal_id, "btp-min");
+    assert_eq!(minimal.maker_side, OutcomeSide::No);
+    assert_eq!(minimal.status, BlockTradeProposalStatus::Pending);
+    assert!(minimal.buyer_subtrader_id.is_none());
+    assert!(minimal.seller_subtrader_id.is_none());
+    assert!(minimal.buyer_accepted_ts.is_none());
+    assert!(minimal.seller_accepted_ts.is_none());
+    assert!(minimal.executed_ts.is_none());
+    assert!(minimal.buyer_order_id.is_none());
+    assert!(minimal.seller_order_id.is_none());
+}
+
+#[test]
+fn created_block_trade_proposal_fixture_decodes() {
+    let created: CreatedBlockTradeProposal =
+        serde_json::from_value(fixture("created_block_trade_proposal")).expect("decode");
+    assert_eq!(created.block_trade_proposal_id, PROPOSAL_ID);
+}
+
+#[tokio::test]
+async fn list_block_trade_proposals_follows_cursors_and_sends_the_filters() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/block-trade-proposals"
+        )))
+        .and(query_param_is_missing("cursor"))
+        .and(query_param("market_ticker", "KXAPRIL-25FEB-YES"))
+        .and(query_param("status", "pending"))
+        .and(query_param("limit", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "block_trade_proposals": [block_trade_proposal_with_id("btp-a")],
+            "cursor": "c1"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/block-trade-proposals"
+        )))
+        .and(query_param("cursor", "c1"))
+        .and(query_param("market_ticker", "KXAPRIL-25FEB-YES"))
+        .and(query_param("status", "pending"))
+        .and(query_param("limit", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "block_trade_proposals": [block_trade_proposal_with_id("btp-b")],
+            "cursor": ""
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let filter = BlockTradeProposalFilter {
+        market_ticker: Some("KXAPRIL-25FEB-YES".into()),
+        status: Some(BlockTradeProposalStatus::Pending),
+    };
+    let proposals = client(&server, true)
+        .list_block_trade_proposals(&filter, 1, 100)
+        .await
+        .expect("proposals");
+    let ids: Vec<_> = proposals.iter().map(|p| p.proposal_id.as_str()).collect();
+    assert_eq!(ids, ["btp-a", "btp-b"]);
+}
+
+#[tokio::test]
+async fn block_trade_proposal_reads_require_credentials() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "block_trade_proposals": [],
+            "cursor": ""
+        })))
+        .mount(&server)
+        .await;
+    let error = client(&server, false)
+        .list_block_trade_proposals(&BlockTradeProposalFilter::default(), 10, 100)
+        .await
+        .expect_err("no credentials");
+    assert!(matches!(error, KalshiError::Auth(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn propose_block_trade_sends_a_signed_request_and_decodes_the_fixture() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let created = fixture("created_block_trade_proposal");
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/block-trade-proposals"
+        )))
+        .and(header_exists(furball::ACCESS_KEY_HEADER))
+        .and(header_exists(furball::ACCESS_TIMESTAMP_HEADER))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let body_ok = body["market_ticker"] == "KXAPRIL-25FEB-YES"
+                && body["price_centi_cents"] == 5400
+                && body["centicount"] == 100000
+                && body["maker_side"] == "yes"
+                && body["buyer_subaccount"] == 2
+                && body["expiration_ts"] == "2025-02-11T12:00:00Z";
+            let signed_ok = header(furball::ACCESS_KEY_HEADER) == KEY_ID
+                && verify(
+                    &header(furball::ACCESS_TIMESTAMP_HEADER),
+                    "POST",
+                    &format!("{API_PREFIX}/communications/block-trade-proposals"),
+                    &header(furball::ACCESS_SIGNATURE_HEADER),
+                );
+            ResponseTemplate::new(if body_ok && signed_ok { 201 } else { 401 })
+                .set_body_json(created.clone())
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    match client
+        .propose_block_trade(&new_block_trade_proposal())
+        .await
+        .expect("created")
+    {
+        WriteOutcome::Sent(created) => assert_eq!(created.block_trade_proposal_id, PROPOSAL_ID),
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn propose_block_trade_5xx_surfaces_ambiguity() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/block-trade-proposals"
+        )))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_json(json!({ "code": 5000, "message": "boom" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    let error = client
+        .propose_block_trade(&new_block_trade_proposal())
+        .await
+        .expect_err("ambiguous");
+    assert!(matches!(error, KalshiError::Ambiguous(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn cancel_block_trade_proposal_sends_a_signed_delete() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/block-trade-proposals/{PROPOSAL_ID}"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let valid = verify(
+                &header(furball::ACCESS_TIMESTAMP_HEADER),
+                "DELETE",
+                &format!("{API_PREFIX}/communications/block-trade-proposals/{PROPOSAL_ID}"),
+                &header(furball::ACCESS_SIGNATURE_HEADER),
+            );
+            ResponseTemplate::new(if valid { 204 } else { 401 })
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    match client
+        .cancel_block_trade_proposal(PROPOSAL_ID)
+        .await
+        .expect("cancelled")
+    {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn accept_block_trade_proposal_sends_the_booking_and_returns_unit() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/block-trade-proposals/{PROPOSAL_ID}/accept"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(|request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let valid = body["subaccount"] == 4
+                && verify(
+                    &header(furball::ACCESS_TIMESTAMP_HEADER),
+                    "POST",
+                    &format!(
+                        "{API_PREFIX}/communications/block-trade-proposals/{PROPOSAL_ID}/accept"
+                    ),
+                    &header(furball::ACCESS_SIGNATURE_HEADER),
+                );
+            ResponseTemplate::new(if valid { 204 } else { 401 })
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    let booking = AcceptBlockTradeProposal {
+        subtrader_id: None,
+        subaccount: Some(4),
+    };
+    match client
+        .accept_block_trade_proposal(PROPOSAL_ID, Some(&booking))
+        .await
+        .expect("accepted")
+    {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn accept_block_trade_proposal_without_a_booking_sends_no_body() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/block-trade-proposals/{PROPOSAL_ID}/accept"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(|request: &MockRequest| {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let valid = request.body.is_empty()
+                && verify(
+                    &header(furball::ACCESS_TIMESTAMP_HEADER),
+                    "POST",
+                    &format!(
+                        "{API_PREFIX}/communications/block-trade-proposals/{PROPOSAL_ID}/accept"
+                    ),
+                    &header(furball::ACCESS_SIGNATURE_HEADER),
+                );
+            ResponseTemplate::new(if valid { 204 } else { 401 })
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    match client
+        .accept_block_trade_proposal(PROPOSAL_ID, None)
+        .await
+        .expect("accepted")
+    {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn reject_block_trade_proposal_sends_a_signed_post_without_a_body() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/block-trade-proposals/{PROPOSAL_ID}/reject"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(|request: &MockRequest| {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let valid = request.body.is_empty()
+                && verify(
+                    &header(furball::ACCESS_TIMESTAMP_HEADER),
+                    "POST",
+                    &format!(
+                        "{API_PREFIX}/communications/block-trade-proposals/{PROPOSAL_ID}/reject"
+                    ),
+                    &header(furball::ACCESS_SIGNATURE_HEADER),
+                );
+            ResponseTemplate::new(if valid { 204 } else { 401 })
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    match client
+        .reject_block_trade_proposal(PROPOSAL_ID)
+        .await
+        .expect("rejected")
+    {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
 }
