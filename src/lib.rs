@@ -22,6 +22,11 @@
 //! - Order book helpers on [`types::Orderbook`]: best bid and ask on both sides (asks derived
 //!   as `1 -` the opposite bid), spread, mid price, depth at N levels, and taker fill cost
 //!   ([`FillCost`]) via [`types::Orderbook::cost_to_fill`].
+//! - Fee calculator ([`FeeCalculator`]): the quadratic fee formulas with the published
+//!   coefficients ([`FeeCoefficients`], overridable via environment variables), Kalshi's
+//!   rounding pipeline (trade fee rounded up to $0.000001, balance alignment, per-order
+//!   rebates in [`FeeAccumulator`]), and [`fee_in_force`] to resolve the fee type and
+//!   multiplier from a [`build_fee_schedule`] at the fill time.
 //!
 //! ```text
 //! caller -> routing (cutoff cache) -> pagination -> send_text (bucket -> sign -> HTTP -> 429 retry)
@@ -32,6 +37,7 @@ mod client;
 mod endpoints;
 mod error;
 mod fee_schedule;
+mod fees;
 mod orderbook;
 mod pagination;
 mod portfolio;
@@ -52,6 +58,11 @@ pub use client::{
 pub use endpoints::{BATCH_CANDLESTICK_TICKERS, MarketFilter, MarketStatus, Period};
 pub use error::{KalshiError, Result};
 pub use fee_schedule::{FeeScheduleRow, build_fee_schedule};
+pub use fees::{
+    BalancePrecision, FEE_COMBO_MAKER_ENV, FEE_MAKER_ENV, FEE_TAKER_ENV, FeeAccumulator,
+    FeeBreakdown, FeeCalculator, FeeCoefficientError, FeeCoefficients, FeeError, FeeSide,
+    ScheduledFee, fee_in_force,
+};
 pub use orderbook::{BookError, FillCost};
 pub use portfolio::{FillFilter, OrderFilter, PositionFilter, SettlementFilter, SettlementStatus};
 pub use pricing::{Count, CountError, Price, PriceError};
