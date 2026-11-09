@@ -323,8 +323,8 @@ pub struct BatchCandlesticksResponse {
     pub markets: Vec<MarketCandlesticks>,
 }
 
-/// Which side the taker was positioned for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// A yes/no side of a market.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutcomeSide {
     /// Taker bought yes or sold no.

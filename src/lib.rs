@@ -18,7 +18,8 @@
 //!   endpoints, split at the cached [`Cutoff`] and merged like trades.
 //! - RFQ and quote reads for negotiated trades: [`Client::get_rfq`], [`Client::list_rfqs`],
 //!   [`Client::get_quote`] and [`Client::list_quotes`]; their writes (create, delete, accept,
-//!   confirm) live on the trading surface.
+//!   confirm) live on the trading surface, along with the RFQ batch writes that quote several
+//!   combos as one all-or-nothing unit.
 //!
 //! ```text
 //! caller -> routing (cutoff cache) -> pagination -> send_text (bucket -> sign -> HTTP -> 429 retry)
@@ -56,7 +57,11 @@ pub use rate_limit::{BATCH_CANCEL_COST, CF_BENCHMARKS_COST, DEFAULT_COST, GET_OR
 pub use routing::{Cutoff, TradeId};
 
 #[cfg(feature = "trading")]
-pub use communications::{CreatedQuote, CreatedRfq, NewQuote, NewRfq, RfqSize};
+pub use communications::{
+    AcceptRfqBatch, AcceptedRfqBatch, CreatedQuote, CreatedRfq, CreatedRfqBatchQuote, NewQuote,
+    NewRfq, NewRfqBatch, NewRfqBatchQuote, RfqBatch, RfqBatchAcceptLimit, RfqBatchChild,
+    RfqBatchQuoteEntry, RfqBatchSize, RfqBatchStatus, RfqChildSize, RfqSize, TickerPair,
+};
 #[cfg(feature = "trading")]
 pub use trading::{
     AmendOrder, AmendedOrder, BatchCancelOrder, BatchCancelResult, BatchCreateResult,

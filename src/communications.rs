@@ -32,7 +32,11 @@ use crate::error::Result;
 use crate::types::{decimal_from_string, optional_decimal_from_string};
 
 #[cfg(feature = "trading")]
-use crate::trading::{TradingClient, WriteOutcome};
+use crate::rate_limit::DEFAULT_COST;
+#[cfg(feature = "trading")]
+use crate::trading::{TradingClient, WriteOutcome, batch_cost};
+#[cfg(feature = "trading")]
+use crate::types::OutcomeSide;
 #[cfg(feature = "trading")]
 use crate::types::decimal_as_string;
 
@@ -660,6 +664,427 @@ impl TradingClient {
     pub async fn confirm_quote(&self, quote_id: &str) -> Result<WriteOutcome<()>> {
         self.write_empty(
             Request::put(format!("/communications/quotes/{quote_id}/confirm")).authenticated(),
+            String::new(),
+            None,
+        )
+        .await
+    }
+}
+
+/// State of an RFQ batch.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "String")]
+pub enum RfqBatchStatus {
+    /// Open: the batch takes batch quotes.
+    Open,
+    /// Accepted: the batch is waiting for its winning makers to confirm, or is executing.
+    Accepted,
+    /// Closed: the batch is finished.
+    Closed,
+    /// A status this crate does not know yet, kept verbatim.
+    Other(String),
+}
+
+#[cfg(feature = "trading")]
+impl From<String> for RfqBatchStatus {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "open" => Self::Open,
+            "accepted" => Self::Accepted,
+            "closed" => Self::Closed,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+/// An RFQ batch with its child RFQs, as returned by the batch endpoints.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RfqBatch {
+    /// UUID of the RFQ batch; pass it unchanged to the batch endpoints.
+    #[serde(rename = "id")]
+    pub rfq_batch_id: String,
+    /// Public communications id of the batch creator (pseudonymous).
+    pub creator_id: String,
+    /// State of the batch.
+    pub status: RfqBatchStatus,
+    /// When the batch was created.
+    pub created_ts: DateTime<Utc>,
+    /// When a batch quote on the batch was accepted.
+    #[serde(default)]
+    pub accepted_ts: Option<DateTime<Utc>>,
+    /// When the batch closed.
+    #[serde(default)]
+    pub closed_ts: Option<DateTime<Utc>>,
+    /// The child RFQs, in the order they were requested.
+    pub rfqs: Vec<Rfq>,
+    /// When the batch was last updated, visible to the batch creator.
+    #[serde(default)]
+    pub updated_ts: Option<DateTime<Utc>>,
+    /// Why the batch closed, visible to the batch creator.
+    #[serde(default)]
+    pub close_reason: Option<String>,
+    /// The `client_batch_id` given at creation, visible to the batch creator.
+    #[serde(default)]
+    pub client_batch_id: Option<String>,
+    /// User id of the batch creator, visible to the creator.
+    #[serde(default)]
+    pub creator_user_id: Option<String>,
+    /// Subaccount of the batch creator, visible to the creator.
+    #[serde(default)]
+    pub creator_subaccount: Option<u32>,
+}
+
+/// One leg of a combo: a market ticker, its event ticker, and the side.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TickerPair {
+    /// Market ticker identifier.
+    pub market_ticker: String,
+    /// Event ticker identifier.
+    pub event_ticker: String,
+    /// Side of the market (yes or no).
+    pub side: OutcomeSide,
+}
+
+/// Size of one child RFQ of a batch, in place of the batch's size: a contract count or a target
+/// cost, exactly one of the two.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, PartialEq)]
+pub enum RfqChildSize {
+    /// Request this many contracts, in 0.01-contract increments.
+    Contracts(Decimal),
+    /// Request a target cost in dollars; the exchange derives the contract count from it.
+    TargetCost(Decimal),
+}
+
+/// One child RFQ of a batch create: the combo to request quotes on, optionally sized on its own.
+///
+/// Set exactly one of [`Self::market_ticker`] and [`Self::selected_markets`].
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RfqBatchChild {
+    /// Ticker of an existing combo market. Set this or `selected_markets`, not both.
+    pub market_ticker: Option<String>,
+    /// Legs of the combo, at most 6, looked up or created in `NewRfqBatch::mve_collection_ticker`.
+    pub selected_markets: Option<Vec<TickerPair>>,
+    /// This child's own size, in place of the batch's size.
+    pub size: Option<RfqChildSize>,
+}
+
+#[cfg(feature = "trading")]
+impl Serialize for RfqBatchChild {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("RfqBatchChild", 4)?;
+        if let Some(market_ticker) = &self.market_ticker {
+            state.serialize_field("market_ticker", market_ticker)?;
+        }
+        if let Some(selected_markets) = &self.selected_markets {
+            state.serialize_field("selected_markets", selected_markets)?;
+        }
+        match &self.size {
+            None => {}
+            Some(RfqChildSize::Contracts(contracts)) => {
+                state.serialize_field("contracts_fp", &contracts.to_string())?;
+            }
+            Some(RfqChildSize::TargetCost(dollars)) => {
+                state.serialize_field("target_cost_dollars", &dollars.to_string())?;
+            }
+        }
+        state.end()
+    }
+}
+
+/// Size of an RFQ batch, for every child that sets no size of its own: a contract count or a
+/// target cost, exactly one of the two.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, PartialEq)]
+pub enum RfqBatchSize {
+    /// Request this many contracts on every unsized child, in 0.01-contract increments.
+    Contracts(Decimal),
+    /// Request a target cost on every unsized child; the exchange derives the contract count.
+    TargetCost {
+        /// Target cost in dollars.
+        dollars: Decimal,
+        /// Size quotes against the target cost as principal only, with taker fees charged on top.
+        excludes_fees: bool,
+    },
+}
+
+/// A new RFQ batch for `POST /communications/rfq_batches`: one child RFQ per combo, quoted as a
+/// unit that fills all-or-nothing.
+///
+/// A batch holds 2 to 57 child RFQs. Each child is sized by its own size, or by the batch's
+/// `size` when it has none; every child must be sized the same way, all by contracts or all by
+/// target cost. `rest_remainder` is always sent as `false`: a batch executes as one fill-or-kill,
+/// so no child rests a remainder.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewRfqBatch {
+    /// The combos to request quotes on, one child RFQ each; 2 to 57 distinct combos.
+    pub children: Vec<RfqBatchChild>,
+    /// Collection in which children given by `selected_markets` are looked up or created;
+    /// required when any child uses `selected_markets`.
+    pub mve_collection_ticker: Option<String>,
+    /// Size for every child that sets no size of its own; required unless every child is sized.
+    pub size: Option<RfqBatchSize>,
+    /// Close the creator's oldest open RFQ batches so this one fits under the open-batch limit.
+    pub replace_existing: bool,
+    /// Hide the creator's communications id from other users until execution.
+    pub obscure_creator_id: bool,
+    /// Caller-chosen key, unique among the creator's batches including those closed within the
+    /// last seven days. Reusing one returns HTTP 409.
+    pub client_batch_id: Option<String>,
+    /// Subtrader to create the batch for (FCM members only).
+    pub subtrader_id: Option<String>,
+    /// Subaccount to create the batch for, 0 for the primary account.
+    pub subaccount: Option<u32>,
+}
+
+#[cfg(feature = "trading")]
+impl Serialize for NewRfqBatch {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("NewRfqBatch", 8)?;
+        state.serialize_field("children", &self.children)?;
+        if let Some(mve_collection_ticker) = &self.mve_collection_ticker {
+            state.serialize_field("mve_collection_ticker", mve_collection_ticker)?;
+        }
+        match &self.size {
+            None => {}
+            Some(RfqBatchSize::Contracts(contracts)) => {
+                state.serialize_field("contracts_fp", &contracts.to_string())?;
+            }
+            Some(RfqBatchSize::TargetCost {
+                dollars,
+                excludes_fees,
+            }) => {
+                state.serialize_field("target_cost_dollars", &dollars.to_string())?;
+                state.serialize_field("target_cost_excludes_fees", excludes_fees)?;
+            }
+        }
+        state.serialize_field("rest_remainder", &false)?;
+        if self.replace_existing {
+            state.serialize_field("replace_existing", &true)?;
+        }
+        if self.obscure_creator_id {
+            state.serialize_field("obscure_creator_id", &true)?;
+        }
+        if let Some(client_batch_id) = &self.client_batch_id {
+            state.serialize_field("client_batch_id", client_batch_id)?;
+        }
+        if let Some(subtrader_id) = &self.subtrader_id {
+            state.serialize_field("subtrader_id", subtrader_id)?;
+        }
+        if let Some(subaccount) = self.subaccount {
+            state.serialize_field("subaccount", &subaccount)?;
+        }
+        state.end()
+    }
+}
+
+/// The minimum acceptable bid on one child when accepting an RFQ batch.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RfqBatchAcceptLimit {
+    /// UUID of the child RFQ; pass it unchanged.
+    pub rfq_id: String,
+    /// The lowest bid taken on this child on the accepted side, in dollars.
+    #[serde(serialize_with = "decimal_as_string")]
+    pub bid_dollars: Decimal,
+}
+
+/// An accept of an RFQ batch, for `PUT /communications/rfq_batches/{rfq_batch_id}/accept`.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, Serialize)]
+pub struct AcceptRfqBatch {
+    /// The side to accept on every child.
+    pub accepted_side: AcceptedSide,
+    /// Price protection, exactly one entry per child in batch order.
+    pub min_bids: Vec<RfqBatchAcceptLimit>,
+    /// Idempotency key; retrying with the same id returns the result of the accept that
+    /// succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_order_id: Option<String>,
+}
+
+/// The result of accepting an RFQ batch.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AcceptedRfqBatch {
+    /// The side accepted on every child.
+    pub accepted_side: AcceptedSide,
+    /// The quote each child was accepted from, in batch order.
+    pub quotes: Vec<Quote>,
+}
+
+/// The bid on one child RFQ of a batch quote.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RfqBatchQuoteEntry {
+    /// UUID of the child RFQ to price; pass it unchanged.
+    pub rfq_id: String,
+    /// Bid price for YES contracts on this child, in dollars.
+    #[serde(serialize_with = "decimal_as_string")]
+    pub yes_bid: Decimal,
+    /// Bid price for NO contracts on this child, in dollars.
+    #[serde(serialize_with = "decimal_as_string")]
+    pub no_bid: Decimal,
+}
+
+/// A batch quote to create, for `POST /communications/rfq_batches/{rfq_batch_id}/quotes`.
+///
+/// A batch quote prices every child of the batch, one entry per child. A new batch quote
+/// replaces the maker's previous one on the same batch, and a child resent at an unchanged price
+/// keeps its time priority.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, Serialize)]
+pub struct NewRfqBatchQuote {
+    /// Prices for every child RFQ of the batch, one entry per child in batch order; 2 to 57.
+    pub quotes: Vec<RfqBatchQuoteEntry>,
+    /// Whether to rest the remainder of each child quote after execution.
+    pub rest_remainder: bool,
+    /// The maker's resting orders are cancelled rather than crossed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub post_only: bool,
+    /// Subaccount to place the batch quote under, 0 for the primary account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subaccount: Option<u32>,
+}
+
+/// The id of a newly created batch quote, as returned by the batch quote create endpoint.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct CreatedRfqBatchQuote {
+    /// UUID of the created batch quote; pass it unchanged to the delete and confirm calls.
+    #[serde(rename = "id")]
+    pub batch_quote_id: String,
+}
+
+#[cfg(feature = "trading")]
+#[derive(Deserialize)]
+struct CreateRfqBatchResponse {
+    rfq_batch: RfqBatch,
+}
+
+#[cfg(feature = "trading")]
+impl TradingClient {
+    /// `POST /communications/rfq_batches`: create an RFQ batch — one child RFQ per combo, quoted
+    /// as a unit that fills all-or-nothing.
+    ///
+    /// Billed [`DEFAULT_COST`] tokens per child, so the whole batch must fit in the Write bucket
+    /// at once or it is rejected locally before any request is sent. With `client_batch_id` set
+    /// the request is marked idempotent: a retry with the same key returns HTTP 409 (the batch
+    /// already exists) rather than a duplicate. Without it, a failure after dispatch surfaces as
+    /// [`crate::KalshiError::Ambiguous`] because a batch may have been created. Charged to the
+    /// Write bucket (the API serves communications endpoints from exchange shard 1, which this
+    /// crate models as the single Write bucket).
+    pub async fn create_rfq_batch(&self, batch: &NewRfqBatch) -> Result<WriteOutcome<RfqBatch>> {
+        let mut request = Request::post("/communications/rfq_batches")
+            .body(batch)
+            .authenticated()
+            .cost(batch_cost(batch.children.len(), DEFAULT_COST));
+        if batch.client_batch_id.is_some() {
+            request = request.idempotent(true);
+        }
+        let outcome: WriteOutcome<CreateRfqBatchResponse> =
+            self.write(request, String::new(), None).await?;
+        Ok(match outcome {
+            WriteOutcome::Sent(response) => WriteOutcome::Sent(response.rfq_batch),
+            WriteOutcome::DryRun(dry) => WriteOutcome::DryRun(dry),
+        })
+    }
+
+    /// `DELETE /communications/rfq_batches/{rfq_batch_id}`: close a batch and all of its child
+    /// RFQs; open batch quotes on it are cancelled. An accepted batch can no longer be closed.
+    /// Idempotent by method.
+    pub async fn delete_rfq_batch(&self, rfq_batch_id: &str) -> Result<WriteOutcome<()>> {
+        self.write_empty(
+            Request::delete(format!("/communications/rfq_batches/{rfq_batch_id}")).authenticated(),
+            String::new(),
+            None,
+        )
+        .await
+    }
+
+    /// `PUT /communications/rfq_batches/{rfq_batch_id}/accept`: accept every child of a batch on
+    /// one side, each from the maker quoting it best on that side. Either every child is accepted
+    /// or none is, and the balance must cover all of them. `min_bids` protects price: a child
+    /// whose best bid on the accepted side is now below its entry fails the accept. Idempotent by
+    /// method; with `client_order_id` set, a retry returns the result of the accept that
+    /// succeeded.
+    pub async fn accept_rfq_batch(
+        &self,
+        rfq_batch_id: &str,
+        accept: &AcceptRfqBatch,
+    ) -> Result<WriteOutcome<AcceptedRfqBatch>> {
+        let request = Request::put(format!("/communications/rfq_batches/{rfq_batch_id}/accept"))
+            .body(accept)
+            .authenticated();
+        self.write(request, String::new(), accept.client_order_id.clone())
+            .await
+    }
+
+    /// `POST /communications/rfq_batches/{rfq_batch_id}/quotes`: quote every child of a batch,
+    /// each exactly once.
+    ///
+    /// Billed [`DEFAULT_COST`] tokens per child. A new batch quote replaces the maker's previous
+    /// one on the same batch, so a retry cannot create a duplicate: the request is marked
+    /// idempotent. A batch quote can win children only within 30 seconds of when it was last
+    /// sent, so resend it to stay eligible. Charged to the Write bucket.
+    pub async fn create_rfq_batch_quote(
+        &self,
+        rfq_batch_id: &str,
+        quote: &NewRfqBatchQuote,
+    ) -> Result<WriteOutcome<CreatedRfqBatchQuote>> {
+        let request = Request::post(format!("/communications/rfq_batches/{rfq_batch_id}/quotes"))
+            .body(quote)
+            .authenticated()
+            .idempotent(true)
+            .cost(batch_cost(quote.quotes.len(), DEFAULT_COST));
+        self.write(request, String::new(), None).await
+    }
+
+    /// `DELETE /communications/rfq_batches/{rfq_batch_id}/quotes/{batch_quote_id}`: withdraw one
+    /// of the maker's open batch quotes; it can no longer be accepted. Idempotent by method.
+    pub async fn delete_rfq_batch_quote(
+        &self,
+        rfq_batch_id: &str,
+        batch_quote_id: &str,
+    ) -> Result<WriteOutcome<()>> {
+        self.write_empty(
+            Request::delete(format!(
+                "/communications/rfq_batches/{rfq_batch_id}/quotes/{batch_quote_id}"
+            ))
+            .authenticated(),
+            String::new(),
+            None,
+        )
+        .await
+    }
+
+    /// `PUT /communications/rfq_batches/{rfq_batch_id}/quotes/{batch_quote_id}/confirm`: confirm
+    /// the children the batch quote won, all at once. Nothing executes until every winning maker
+    /// of the batch has confirmed; a missed confirmation closes the whole batch without trading.
+    /// Idempotent by method.
+    pub async fn confirm_rfq_batch_quote(
+        &self,
+        rfq_batch_id: &str,
+        batch_quote_id: &str,
+    ) -> Result<WriteOutcome<()>> {
+        self.write_empty(
+            Request::put(format!(
+                "/communications/rfq_batches/{rfq_batch_id}/quotes/{batch_quote_id}/confirm"
+            ))
+            .authenticated(),
             String::new(),
             None,
         )
