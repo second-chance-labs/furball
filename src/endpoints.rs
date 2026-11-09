@@ -4,10 +4,10 @@ use crate::client::{Client, Request};
 use crate::error::Result;
 use crate::rate_limit::CF_BENCHMARKS_COST;
 use crate::types::{
-    BatchCandlesticksResponse, Candlestick, CandlesticksResponse, CfBenchmarksResponse, Event,
-    EventFeeChange, EventResponse, Market, MarketCandlesticks, MarketResponse, Orderbook,
-    OrderbookResponse, Series, SeriesFeeChange, SeriesFeeChangesResponse, SeriesListResponse,
-    SeriesResponse, Trade,
+    AccountLimits, BatchCandlesticksResponse, Candlestick, CandlesticksResponse,
+    CfBenchmarksResponse, EndpointCosts, Event, EventFeeChange, EventResponse, Market,
+    MarketCandlesticks, MarketResponse, Orderbook, OrderbookResponse, Series, SeriesFeeChange,
+    SeriesFeeChangesResponse, SeriesListResponse, SeriesResponse, Trade,
 };
 
 /// Maximum tickers Kalshi accepts in one batch candlestick request.
@@ -294,6 +294,20 @@ impl Client {
             .cost(CF_BENCHMARKS_COST)
             .authenticated();
         self.send(&request).await
+    }
+
+    /// `GET /account/limits`: the account's usage tier, Read and Write bucket limits, and grants.
+    /// Needs credentials. `usage_tier` is the tier to size a client with for this account.
+    pub async fn account_limits(&self) -> Result<AccountLimits> {
+        self.send(&Request::get("/account/limits").authenticated())
+            .await
+    }
+
+    /// `GET /account/endpoint_costs`: the default token cost and every endpoint whose cost
+    /// differs from it. Needs credentials.
+    pub async fn account_endpoint_costs(&self) -> Result<EndpointCosts> {
+        self.send(&Request::get("/account/endpoint_costs").authenticated())
+            .await
     }
 }
 

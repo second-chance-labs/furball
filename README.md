@@ -4,6 +4,8 @@ A read-only Rust SDK for [Kalshi's Trade API v2](https://docs.kalshi.com). No tr
 
 - Request signing (Ed25519 or RSA-PSS/SHA-256, detected from the PEM key) for authenticated endpoints; public endpoints need no keys.
 - Token-bucket rate limiting sized by account tier, with retry on HTTP 429 (exponential backoff, jitter, `Retry-After`).
+- Independent Read, Write and balance token buckets per [`Tier`](https://docs.kalshi.com/getting_started/rate_limits); a request costing more than its bucket holds is rejected locally (`KalshiError::CostExceedsBucket`) before it is sent.
+- `Client::account_limits` and `Client::account_endpoint_costs` read the account's usage tier, bucket limits, grants, and non-default endpoint costs.
 - GET, POST, PUT and DELETE transport with JSON bodies. A non-idempotent write that fails after dispatch (timeout, connection failure, HTTP 5xx) yields `KalshiError::Ambiguous` instead of being retried.
 - Cursor pagination as a lazy `Stream`.
 - Transparent routing between live and historical endpoints (markets, candlesticks, trades) using the cached `/historical/cutoff`.

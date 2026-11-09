@@ -1,0 +1,19 @@
+{
+  "usage_tier": "expert",
+  "read": { "refill_rate": 600, "bucket_capacity": 600 },
+  "write": { "refill_rate": 600, "bucket_capacity": 1800 },
+  "grants": [
+    {
+      "exchange_instance": "event_contract",
+      "level": "prestige",
+      "source": "manual",
+      "expires_ts": null
+    },
+    {
+      "exchange_instance": "margined",
+      "level": "prime",
+      "source": "volume",
+      "expires_ts": 1893456000
+    }
+  ]
+}

@@ -334,3 +334,92 @@ async fn cf_benchmarks_require_credentials_and_sign_the_request() {
         .expect_err("no credentials");
     assert!(matches!(error, KalshiError::Auth(_)));
 }
+
+#[tokio::test]
+async fn account_limits_decode_tier_buckets_and_grants() {
+    let server = MockServer::start().await;
+    Mock::given(path(format!("{API_PREFIX}/account/limits")))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture("account_limits")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let limits = client(&server, true)
+        .account_limits()
+        .await
+        .expect("limits");
+    assert_eq!(limits.usage_tier, furball::Tier::Expert);
+    assert_eq!(
+        limits.read,
+        furball::types::BucketLimit {
+            refill_rate: 600,
+            bucket_capacity: 600
+        }
+    );
+    assert_eq!(
+        limits.write,
+        furball::types::BucketLimit {
+            refill_rate: 600,
+            bucket_capacity: 1800
+        }
+    );
+    assert_eq!(limits.grants.len(), 2);
+    assert_eq!(
+        limits.grants[0].exchange_instance,
+        furball::types::ExchangeInstance::EventContract
+    );
+    assert_eq!(limits.grants[0].level, furball::Tier::Prestige);
+    assert_eq!(limits.grants[0].source, furball::types::GrantSource::Manual);
+    assert_eq!(limits.grants[0].expires_ts, None);
+    assert_eq!(
+        limits.grants[1].exchange_instance,
+        furball::types::ExchangeInstance::Margined
+    );
+    assert_eq!(limits.grants[1].level, furball::Tier::Prime);
+    assert_eq!(limits.grants[1].source, furball::types::GrantSource::Volume);
+    assert_eq!(limits.grants[1].expires_ts, Some(1_893_456_000));
+
+    let error = client(&server, false)
+        .account_limits()
+        .await
+        .expect_err("no credentials");
+    assert!(matches!(error, KalshiError::Auth(_)));
+}
+
+#[tokio::test]
+async fn account_endpoint_costs_decode_default_and_overrides() {
+    let server = MockServer::start().await;
+    Mock::given(path(format!("{API_PREFIX}/account/endpoint_costs")))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture("endpoint_costs")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let costs = client(&server, true)
+        .account_endpoint_costs()
+        .await
+        .expect("costs");
+    assert_eq!(costs.default_cost, 10);
+    assert_eq!(costs.endpoint_costs.len(), 2);
+    assert_eq!(costs.endpoint_costs[0].method, "POST");
+    assert_eq!(costs.endpoint_costs[0].path, "/portfolio/orders/batch");
+    assert_eq!(costs.endpoint_costs[0].cost, 50);
+    assert_eq!(costs.endpoint_costs[1].method, "GET");
+    assert_eq!(costs.endpoint_costs[1].path, "/cfbenchmarks/values");
+    assert_eq!(costs.endpoint_costs[1].cost, 50);
+}
+
+#[test]
+fn unknown_tier_names_are_rejected_with_their_name() {
+    assert_eq!(furball::Tier::from_name("transcendent"), None);
+    let decoded: Result<furball::Tier, _> = serde_json::from_value(json!("transcendent"));
+    assert!(decoded.unwrap_err().to_string().contains("transcendent"));
+    assert_eq!(
+        furball::Tier::from_name("basic"),
+        Some(furball::Tier::Basic)
+    );
+    assert_eq!(
+        furball::Tier::from_name("prestige"),
+        Some(furball::Tier::Prestige)
+    );
+}

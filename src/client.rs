@@ -14,7 +14,7 @@ use crate::auth::{
     ACCESS_KEY_HEADER, ACCESS_SIGNATURE_HEADER, ACCESS_TIMESTAMP_HEADER, Credentials,
 };
 use crate::error::{ApiError, KalshiError, Result};
-use crate::rate_limit::{DEFAULT_COST, ReadBucket, Tier};
+use crate::rate_limit::{BucketKind, DEFAULT_COST, Tier, TokenBucket};
 use crate::routing::Cutoff;
 
 /// Production base URL.
@@ -27,8 +27,8 @@ pub const DEMO_URL: &str = "https://demo-api.kalshi.co/trade-api/v2";
 /// Maximum attempts for one request, counting the first.
 pub const MAX_ATTEMPTS: u32 = 5;
 
-/// One Kalshi API request: method, where it goes, what it costs, whether it must be signed,
-/// and whether it is safe to retry.
+/// One Kalshi API request: method, where it goes, what it costs, which rate bucket it draws
+/// from, whether it must be signed, and whether it is safe to retry.
 #[derive(Debug, Clone)]
 pub struct Request {
     pub(crate) method: Method,
@@ -36,42 +36,45 @@ pub struct Request {
     pub(crate) query: Vec<(String, String)>,
     pub(crate) body: Option<serde_json::Value>,
     pub(crate) cost: u32,
+    pub(crate) bucket: BucketKind,
     pub(crate) authenticated: bool,
     pub(crate) idempotent: bool,
 }
 
 impl Request {
-    /// A GET read costing the default 10 tokens. `path` is relative to the base URL and starts with `/`.
-    /// Idempotent: a failure after dispatch surfaces as [`KalshiError::Transport`].
+    /// A GET read costing the default 10 tokens from the Read bucket. `path` is relative to the
+    /// base URL and starts with `/`. Idempotent: a failure after dispatch surfaces as
+    /// [`KalshiError::Transport`].
     pub fn get(path: impl Into<String>) -> Self {
-        Self::new(Method::GET, path, true)
+        Self::new(Method::GET, path, true, BucketKind::Read)
     }
 
-    /// A POST write costing the default 10 tokens. Not idempotent by default: a timeout,
-    /// connection failure, or HTTP 5xx surfaces as [`KalshiError::Ambiguous`] because the write
-    /// may have landed. Callers that make a POST safe to retry (for example by supplying a
-    /// `client_order_id`) should mark it idempotent.
+    /// A POST write costing the default 10 tokens from the Write bucket. Not idempotent by
+    /// default: a timeout, connection failure, or HTTP 5xx surfaces as
+    /// [`KalshiError::Ambiguous`] because the write may have landed. Callers that make a POST
+    /// safe to retry (for example by supplying a `client_order_id`) should mark it idempotent.
     pub fn post(path: impl Into<String>) -> Self {
-        Self::new(Method::POST, path, false)
+        Self::new(Method::POST, path, false, BucketKind::Write)
     }
 
-    /// A PUT write costing the default 10 tokens. Idempotent by method.
+    /// A PUT write costing the default 10 tokens from the Write bucket. Idempotent by method.
     pub fn put(path: impl Into<String>) -> Self {
-        Self::new(Method::PUT, path, true)
+        Self::new(Method::PUT, path, true, BucketKind::Write)
     }
 
-    /// A DELETE write costing the default 10 tokens. Idempotent by method.
+    /// A DELETE write costing the default 10 tokens from the Write bucket. Idempotent by method.
     pub fn delete(path: impl Into<String>) -> Self {
-        Self::new(Method::DELETE, path, true)
+        Self::new(Method::DELETE, path, true, BucketKind::Write)
     }
 
-    fn new(method: Method, path: impl Into<String>, idempotent: bool) -> Self {
+    fn new(method: Method, path: impl Into<String>, idempotent: bool, bucket: BucketKind) -> Self {
         Self {
             method,
             path: path.into(),
             query: Vec::new(),
             body: None,
             cost: DEFAULT_COST,
+            bucket,
             authenticated: false,
             idempotent,
         }
@@ -98,9 +101,16 @@ impl Request {
         }
     }
 
-    /// Sets the token cost this endpoint declares.
+    /// Sets the token cost this endpoint declares. Batch calls bill per item: pass the sum.
     pub fn cost(mut self, cost: u32) -> Self {
         self.cost = cost;
+        self
+    }
+
+    /// Draws from the dedicated balance bucket (one token per second on Basic and Advanced,
+    /// five per second above) instead of the Read bucket.
+    pub fn balance(mut self) -> Self {
+        self.bucket = BucketKind::Balance;
         self
     }
 
@@ -183,7 +193,17 @@ impl ClientBuilder {
                 http: reqwest::Client::new(),
                 base,
                 credentials: self.credentials,
-                bucket: ReadBucket::new(self.tier.read_budget(), self.tier.read_capacity()),
+                read: TokenBucket::new("read", self.tier.read_budget(), self.tier.read_capacity()),
+                write: TokenBucket::new(
+                    "write",
+                    self.tier.write_budget(),
+                    self.tier.write_capacity(),
+                ),
+                balance: TokenBucket::new(
+                    "balance",
+                    self.tier.balance_budget(),
+                    self.tier.balance_budget(),
+                ),
                 backoff_base: self.backoff_base,
                 cutoff_ttl: self.cutoff_ttl,
                 cutoff: Mutex::new(None),
@@ -196,7 +216,9 @@ pub(crate) struct Inner {
     http: reqwest::Client,
     base: Url,
     credentials: Option<Credentials>,
-    bucket: ReadBucket,
+    read: TokenBucket,
+    write: TokenBucket,
+    balance: TokenBucket,
     backoff_base: Duration,
     pub(crate) cutoff_ttl: Duration,
     pub(crate) cutoff: Mutex<Option<(Instant, Cutoff)>>,
@@ -224,7 +246,12 @@ impl Client {
         let inner = &self.inner;
         let mut attempt = 1;
         loop {
-            inner.bucket.acquire(request.cost).await;
+            let bucket = match request.bucket {
+                BucketKind::Read => &inner.read,
+                BucketKind::Write => &inner.write,
+                BucketKind::Balance => &inner.balance,
+            };
+            bucket.acquire(request.cost).await?;
             let response = match self.build(request)?.send().await {
                 Ok(response) => response,
                 Err(error) => return Err(transport_failure(request, error)),

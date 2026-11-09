@@ -1,8 +1,8 @@
 #![doc = include_str!("../README.md")]
 //! Transport client for Kalshi's Trade API v2 (read-only endpoint surface for now).
 //!
-//! - [`Client`] signs requests ([`Credentials`]), throttles them with a token bucket sized by [`Tier`],
-//!   and retries HTTP 429 with exponential backoff.
+//! - [`Client`] signs requests ([`Credentials`]), throttles them with independent Read, Write and
+//!   balance token buckets sized by [`Tier`], and retries HTTP 429 with exponential backoff.
 //! - The transport sends GET, POST, PUT and DELETE with optional JSON bodies. A failure of a
 //!   non-idempotent write after dispatch surfaces as [`KalshiError::Ambiguous`] instead of being
 //!   retried, so callers can reconcile before retrying.
