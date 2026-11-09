@@ -9,6 +9,8 @@
 //! - [`Client::paginate`] follows cursors as a lazy stream.
 //! - [`Client::market`], [`Client::candlesticks`] and [`Client::trades`] hide the split between live
 //!   and historical endpoints using the cached [`Cutoff`].
+//! - The trading write surface (`TradingClient`) is behind the `trading` cargo feature, off by
+//!   default: a default build contains no write methods.
 //!
 //! ```text
 //! caller -> routing (cutoff cache) -> pagination -> send_text (bucket -> sign -> HTTP -> 429 retry)
@@ -22,6 +24,8 @@ mod fee_schedule;
 mod pagination;
 mod rate_limit;
 mod routing;
+#[cfg(feature = "trading")]
+mod trading;
 pub mod types;
 
 pub use auth::{
@@ -36,3 +40,9 @@ pub use error::{KalshiError, Result};
 pub use fee_schedule::{FeeScheduleRow, build_fee_schedule};
 pub use rate_limit::{CF_BENCHMARKS_COST, DEFAULT_COST, Tier};
 pub use routing::{Cutoff, TradeId};
+
+#[cfg(feature = "trading")]
+pub use trading::{
+    CancelledOrder, DryRun, Environment, NewOrder, Order, OrderSide, SelfTradePrevention,
+    TimeInForce, TradingClient, TradingClientBuilder, WriteOutcome,
+};

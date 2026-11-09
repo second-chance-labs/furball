@@ -60,6 +60,12 @@ pub enum KalshiError {
         /// Capacity of the bucket the request draws from.
         capacity: u32,
     },
+    /// A trading write was attempted while the global kill switch is on. No network call was made.
+    #[error("trading is halted")]
+    TradingHalted,
+    /// A `TradingClient` was misconfigured and refuses to build.
+    #[error("trading client is disabled: {0}")]
+    TradingDisabled(String),
     /// The request never produced an HTTP response (connection, TLS, timeout).
     #[error("kalshi transport error: {0}")]
     Transport(reqwest::Error),
