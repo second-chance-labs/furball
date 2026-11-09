@@ -232,12 +232,85 @@ impl TradingClient {
         .await
     }
 
+    /// `DELETE /portfolio/events/orders`: cancel every resting order on one subaccount.
+    ///
+    /// The subaccount number (0 for the primary account) is a required argument so a caller
+    /// cannot cancel across every subaccount without naming one. Returns 204 with no body.
+    pub async fn cancel_all(&self, subaccount: u32) -> Result<WriteOutcome<()>> {
+        self.write_empty(
+            Request::delete("/portfolio/events/orders")
+                .query("subaccount", subaccount)
+                .authenticated(),
+            String::new(),
+            None,
+        )
+        .await
+    }
+
+    /// `POST /portfolio/events/orders/{order_id}/amend`: change the price, size, and/or
+    /// expiration of a resting order. Not idempotent: a failure after dispatch surfaces as
+    /// [`KalshiError::Ambiguous`].
+    pub async fn amend_order(
+        &self,
+        order_id: &str,
+        amend: &AmendOrder,
+    ) -> Result<WriteOutcome<AmendedOrder>> {
+        let request = Request::post(format!("/portfolio/events/orders/{order_id}/amend"))
+            .body(amend)
+            .authenticated();
+        self.write(request, amend.ticker.clone(), None).await
+    }
+
+    /// `POST /portfolio/events/orders/{order_id}/decrease`: reduce a resting order's remaining
+    /// count, either by an amount ([`DecreaseAmount::By`]) or to an amount
+    /// ([`DecreaseAmount::To`]). Not idempotent: a failure after dispatch surfaces as
+    /// [`KalshiError::Ambiguous`].
+    pub async fn decrease_order(
+        &self,
+        order_id: &str,
+        amount: &DecreaseAmount,
+    ) -> Result<WriteOutcome<DecreasedOrder>> {
+        let request = Request::post(format!("/portfolio/events/orders/{order_id}/decrease"))
+            .body(amount)
+            .authenticated();
+        self.write(request, String::new(), None).await
+    }
+
     async fn write<T: DeserializeOwned>(
         &self,
         request: Request,
         ticker: String,
         client_order_id: Option<String>,
     ) -> Result<WriteOutcome<T>> {
+        match self.dispatch(request, ticker, client_order_id).await? {
+            WriteOutcome::Sent(body) => {
+                let decoded = serde_json::from_str(&body)
+                    .map_err(|source| KalshiError::Decode { body, source })?;
+                Ok(WriteOutcome::Sent(decoded))
+            }
+            WriteOutcome::DryRun(dry) => Ok(WriteOutcome::DryRun(dry)),
+        }
+    }
+
+    /// Like [`Self::write`] for endpoints that answer with no body: the raw body is discarded.
+    async fn write_empty(
+        &self,
+        request: Request,
+        ticker: String,
+        client_order_id: Option<String>,
+    ) -> Result<WriteOutcome<()>> {
+        match self.dispatch(request, ticker, client_order_id).await? {
+            WriteOutcome::Sent(_) => Ok(WriteOutcome::Sent(())),
+            WriteOutcome::DryRun(dry) => Ok(WriteOutcome::DryRun(dry)),
+        }
+    }
+
+    async fn dispatch(
+        &self,
+        request: Request,
+        ticker: String,
+        client_order_id: Option<String>,
+    ) -> Result<WriteOutcome<String>> {
         if HALTED.load(Ordering::SeqCst) {
             return Err(KalshiError::TradingHalted);
         }
@@ -261,9 +334,7 @@ impl TradingClient {
         }
         let request = request.halted_when(|| HALTED.load(Ordering::SeqCst));
         let body = self.client.send_text(&request).await?;
-        let decoded =
-            serde_json::from_str(&body).map_err(|source| KalshiError::Decode { body, source })?;
-        Ok(WriteOutcome::Sent(decoded))
+        Ok(WriteOutcome::Sent(body))
     }
 }
 
@@ -566,4 +637,125 @@ pub struct CancelledOrder {
     /// Contracts the cancel removed from the order.
     #[serde(deserialize_with = "decimal_from_string")]
     pub reduced_by: Decimal,
+}
+
+/// Fields for `POST /portfolio/events/orders/{order_id}/amend`. All four required fields are
+/// struct fields, so none can be omitted.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AmendOrder {
+    /// Market ticker of the order.
+    pub ticker: String,
+    /// Side of the order.
+    pub side: OrderSide,
+    /// Updated price in dollars, sent as a fixed-point string.
+    #[serde(serialize_with = "decimal_as_string")]
+    pub price: Decimal,
+    /// Updated total (max fillable) count: already-filled count plus the desired resting
+    /// remaining count, sent as a fixed-point string.
+    #[serde(serialize_with = "decimal_as_string")]
+    pub count: Decimal,
+    /// The original client order id, when the order was created with one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_order_id: Option<String>,
+    /// New client order id after the amend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_client_order_id: Option<String>,
+    /// New expiration time in Unix seconds; 0 removes it (good-till-canceled). Omit to keep
+    /// the current expiry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiration_time: Option<i64>,
+}
+
+/// Response of `POST /portfolio/events/orders/{order_id}/amend`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AmendedOrder {
+    /// Kalshi order id.
+    pub order_id: String,
+    /// The client order id after the amend, when present.
+    #[serde(default)]
+    pub client_order_id: Option<String>,
+    /// Resting contracts after the amend; present when the resting size changed.
+    #[serde(default, deserialize_with = "optional_decimal_from_string")]
+    pub remaining_count: Option<Decimal>,
+    /// Contracts filled by the amend; present when fills occurred.
+    #[serde(default, deserialize_with = "optional_decimal_from_string")]
+    pub fill_count: Option<Decimal>,
+    /// Volume-weighted average fill price of the amend's fills, present when fills occurred.
+    #[serde(default, deserialize_with = "optional_decimal_from_string")]
+    pub average_fill_price: Option<Decimal>,
+    /// Volume-weighted average fee per contract of the amend's fills, present when fills
+    /// occurred.
+    #[serde(default, deserialize_with = "optional_decimal_from_string")]
+    pub average_fee_paid: Option<Decimal>,
+    /// Engine timestamp, Unix milliseconds.
+    pub ts_ms: i64,
+}
+
+/// The size change of `POST /portfolio/events/orders/{order_id}/decrease`: exactly one of the
+/// two variants, so a request with both fields or with neither does not exist.
+///
+/// ```rust,compile_fail
+/// use furball::DecreaseAmount;
+/// // Both fields at once does not compile: the variants take exactly one count.
+/// let _ = DecreaseAmount::By(1.into(), 2.into());
+/// ```
+///
+/// ```rust,compile_fail
+/// use furball::DecreaseAmount;
+/// // Neither field does not compile: there is no empty variant.
+/// let _ = DecreaseAmount::Neither;
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecreaseAmount {
+    /// Reduce the order's remaining count by this many contracts.
+    By(Decimal),
+    /// Reduce the order's remaining count to this many contracts.
+    To(Decimal),
+}
+
+impl Serialize for DecreaseAmount {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Self::By(reduce_by) => {
+                #[derive(Serialize)]
+                struct Body {
+                    #[serde(serialize_with = "decimal_as_string")]
+                    reduce_by: Decimal,
+                }
+                Body {
+                    reduce_by: *reduce_by,
+                }
+                .serialize(serializer)
+            }
+            Self::To(reduce_to) => {
+                #[derive(Serialize)]
+                struct Body {
+                    #[serde(serialize_with = "decimal_as_string")]
+                    reduce_to: Decimal,
+                }
+                Body {
+                    reduce_to: *reduce_to,
+                }
+                .serialize(serializer)
+            }
+        }
+    }
+}
+
+/// Response of `POST /portfolio/events/orders/{order_id}/decrease`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DecreasedOrder {
+    /// Kalshi order id.
+    pub order_id: String,
+    /// The client order id, when present.
+    #[serde(default)]
+    pub client_order_id: Option<String>,
+    /// Contracts remaining after the decrease.
+    #[serde(deserialize_with = "decimal_from_string")]
+    pub remaining_count: Decimal,
+    /// Engine timestamp, Unix milliseconds.
+    pub ts_ms: i64,
 }

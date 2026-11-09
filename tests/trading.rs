@@ -7,12 +7,12 @@ use std::time::Duration;
 
 use common::{API_PREFIX, KEY_ID, credentials, verify_rsa as verify};
 use furball::{
-    CreateOrderV2, KalshiError, OrderBuilder, OrderSide, SelfTradePrevention, TimeInForce,
-    TradingClient, WriteOutcome,
+    AmendOrder, CreateOrderV2, DecreaseAmount, KalshiError, OrderBuilder, OrderSide,
+    SelfTradePrevention, TimeInForce, TradingClient, WriteOutcome,
 };
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
-use wiremock::matchers::{header_exists, method, path};
+use wiremock::matchers::{header_exists, method, path, query_param};
 use wiremock::{Mock, MockServer, Request as MockRequest, ResponseTemplate};
 
 fn order(client_order_id: Option<&str>) -> CreateOrderV2 {
@@ -372,6 +372,208 @@ async fn cancel_order_sends_a_signed_delete() {
             assert_eq!(cancelled.order_id, "o1");
             assert_eq!(cancelled.client_order_id, Some("co-1".into()));
             assert_eq!(cancelled.reduced_by, Decimal::new(10, 0));
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn cancel_all_sends_a_signed_delete_scoped_to_one_subaccount() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("{API_PREFIX}/portfolio/events/orders")))
+        .and(query_param("subaccount", "2"))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(|request: &MockRequest| {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let valid = verify(
+                &header(furball::ACCESS_TIMESTAMP_HEADER),
+                "DELETE",
+                &format!("{API_PREFIX}/portfolio/events/orders"),
+                &header(furball::ACCESS_SIGNATURE_HEADER),
+            );
+            ResponseTemplate::new(if valid { 204 } else { 401 })
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    match client.cancel_all(2).await.expect("cancelled all") {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn amend_order_sends_the_required_fields_and_decodes_the_response() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/portfolio/events/orders/o1/amend"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(|request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let body_ok = body["ticker"] == "KXUPDOWN-25DEC"
+                && body["side"] == "bid"
+                && body["price"] == "0.6000"
+                && body["count"] == "12"
+                && body["client_order_id"] == "co-1"
+                && body["updated_client_order_id"] == "co-2"
+                && body["expiration_time"] == 1_767_000_000i64;
+            ResponseTemplate::new(if body_ok { 200 } else { 400 }).set_body_json(json!({
+                "order_id": "o1",
+                "client_order_id": "co-2",
+                "remaining_count": "10",
+                "fill_count": "2",
+                "average_fill_price": "0.60",
+                "average_fee_paid": "0.01",
+                "ts_ms": 1_700_000_000_000i64
+            }))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    let amend = AmendOrder {
+        ticker: "KXUPDOWN-25DEC".into(),
+        side: OrderSide::Bid,
+        price: "0.6000".parse().expect("price"),
+        count: 12.into(),
+        client_order_id: Some("co-1".into()),
+        updated_client_order_id: Some("co-2".into()),
+        expiration_time: Some(1_767_000_000),
+    };
+    match client.amend_order("o1", &amend).await.expect("amended") {
+        WriteOutcome::Sent(amended) => {
+            assert_eq!(amended.order_id, "o1");
+            assert_eq!(amended.client_order_id, Some("co-2".into()));
+            assert_eq!(amended.remaining_count, Some(Decimal::new(10, 0)));
+            assert_eq!(amended.fill_count, Some(Decimal::new(2, 0)));
+            assert_eq!(
+                amended.average_fill_price,
+                Some("0.60".parse().expect("decimal"))
+            );
+            assert_eq!(
+                amended.average_fee_paid,
+                Some("0.01".parse().expect("decimal"))
+            );
+            assert_eq!(amended.ts_ms, 1_700_000_000_000);
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn amend_order_omits_unset_optional_fields() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/portfolio/events/orders/o1/amend"
+        )))
+        .respond_with(|request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let body_ok = body["ticker"] == "KXUPDOWN-25DEC"
+                && body["side"] == "ask"
+                && body["price"] == "0.40"
+                && body["count"] == "8"
+                && body.get("client_order_id").is_none()
+                && body.get("updated_client_order_id").is_none()
+                && body.get("expiration_time").is_none();
+            ResponseTemplate::new(if body_ok { 200 } else { 400 }).set_body_json(json!({
+                "order_id": "o1",
+                "ts_ms": 1_700_000_000_000i64
+            }))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    let amend = AmendOrder {
+        ticker: "KXUPDOWN-25DEC".into(),
+        side: OrderSide::Ask,
+        price: "0.40".parse().expect("price"),
+        count: 8.into(),
+        client_order_id: None,
+        updated_client_order_id: None,
+        expiration_time: None,
+    };
+    match client.amend_order("o1", &amend).await.expect("amended") {
+        WriteOutcome::Sent(amended) => {
+            assert_eq!(amended.order_id, "o1");
+            assert_eq!(amended.client_order_id, None);
+            assert_eq!(amended.remaining_count, None);
+            assert_eq!(amended.fill_count, None);
+            assert_eq!(amended.average_fill_price, None);
+            assert_eq!(amended.average_fee_paid, None);
+            assert_eq!(amended.ts_ms, 1_700_000_000_000);
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn decrease_order_serializes_exactly_one_of_reduce_by_or_reduce_to() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/portfolio/events/orders/o1/decrease"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(|request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let by = body.get("reduce_by").and_then(Value::as_str);
+            let to = body.get("reduce_to").and_then(Value::as_str);
+            let body_ok =
+                (by == Some("2.00") && to.is_none()) || (by.is_none() && to == Some("3.00"));
+            ResponseTemplate::new(if body_ok { 200 } else { 400 }).set_body_json(json!({
+                "order_id": "o1",
+                "client_order_id": "co-1",
+                "remaining_count": "8.00",
+                "ts_ms": 1_700_000_000_000i64
+            }))
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    let outcome = client
+        .decrease_order("o1", &DecreaseAmount::By("2.00".parse().expect("decimal")))
+        .await
+        .expect("decreased");
+    match outcome {
+        WriteOutcome::Sent(decreased) => {
+            assert_eq!(decreased.order_id, "o1");
+            assert_eq!(decreased.client_order_id, Some("co-1".into()));
+            assert_eq!(decreased.remaining_count, "8.00".parse().expect("decimal"));
+            assert_eq!(decreased.ts_ms, 1_700_000_000_000);
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+    let outcome = client
+        .decrease_order("o1", &DecreaseAmount::To("3.00".parse().expect("decimal")))
+        .await
+        .expect("decreased");
+    match outcome {
+        WriteOutcome::Sent(decreased) => {
+            assert_eq!(decreased.order_id, "o1");
+            assert_eq!(decreased.remaining_count, "8.00".parse().expect("decimal"));
         }
         WriteOutcome::DryRun(_) => panic!("not a dry run"),
     }
