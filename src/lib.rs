@@ -22,6 +22,10 @@
 //! - Order book helpers on [`types::Orderbook`]: best bid and ask on both sides (asks derived
 //!   as `1 -` the opposite bid), spread, mid price, depth at N levels, and taker fill cost
 //!   ([`FillCost`]) via [`types::Orderbook::cost_to_fill`].
+//! - Position math from fills: the settlement payoff of yes and no positions on binary
+//!   and scalar markets ([`payoff_at_settlement`]), realized and unrealized profit and
+//!   loss with fees subtracted ([`realized_pnl`], [`unrealized_pnl`]), and the
+//!   volume-weighted average entry price ([`average_entry_price`]).
 //! - Fee calculator ([`FeeCalculator`]): the quadratic fee formulas with the published
 //!   coefficients ([`FeeCoefficients`], overridable via environment variables), Kalshi's
 //!   rounding pipeline (trade fee rounded up to $0.000001, balance alignment, per-order
@@ -40,6 +44,7 @@ mod fee_schedule;
 mod fees;
 mod orderbook;
 mod pagination;
+mod pnl;
 mod portfolio;
 mod pricing;
 mod rate_limit;
@@ -64,6 +69,10 @@ pub use fees::{
     ScheduledFee, fee_in_force,
 };
 pub use orderbook::{BookError, FillCost};
+pub use pnl::{
+    PnlError, SettlementError, average_entry_price, payoff_at_settlement, realized_pnl,
+    unrealized_pnl,
+};
 pub use portfolio::{FillFilter, OrderFilter, PositionFilter, SettlementFilter, SettlementStatus};
 pub use pricing::{Count, CountError, Price, PriceError};
 pub use rate_limit::{BATCH_CANCEL_COST, CF_BENCHMARKS_COST, DEFAULT_COST, GET_ORDER_COST, Tier};
