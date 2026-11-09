@@ -2,12 +2,16 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{API_PREFIX, Item, client};
-use furball::{KalshiError, MAX_ATTEMPTS, Request};
+use common::verify_rsa as verify;
+use common::{API_PREFIX, Item, KEY_ID, client};
+use furball::{
+    ACCESS_KEY_HEADER, ACCESS_SIGNATURE_HEADER, ACCESS_TIMESTAMP_HEADER, KalshiError, MAX_ATTEMPTS,
+    Request,
+};
 use futures::TryStreamExt;
 use serde_json::{Value, json};
-use wiremock::matchers::{method, path, query_param, query_param_is_missing};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::matchers::{header_exists, method, path, query_param, query_param_is_missing};
+use wiremock::{Mock, MockServer, Request as MockRequest, ResponseTemplate};
 
 fn page(ids: &[&str], cursor: &str) -> ResponseTemplate {
     let items: Vec<Value> = ids.iter().map(|id| json!({ "id": id })).collect();
@@ -193,5 +197,228 @@ async fn token_bucket_delays_requests_beyond_its_capacity() {
         started.elapsed() >= Duration::from_millis(900),
         "elapsed {:?}",
         started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn post_sends_json_body_and_signs_path_only() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/orders")))
+        .and(header_exists(ACCESS_KEY_HEADER))
+        .and(header_exists(ACCESS_TIMESTAMP_HEADER))
+        .and(header_exists(ACCESS_SIGNATURE_HEADER))
+        .respond_with(|request: &MockRequest| {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let body_ok = body["ticker"] == "KXUPDOWN"
+                && body["side"] == "buy"
+                && body["type"] == "limit"
+                && body["limit_price_dollars"] == "0.42"
+                && body["size"] == 10;
+            let signed_ok = header(ACCESS_KEY_HEADER) == KEY_ID
+                && verify(
+                    &header(ACCESS_TIMESTAMP_HEADER),
+                    "POST",
+                    &format!("{API_PREFIX}/portfolio/orders"),
+                    &header(ACCESS_SIGNATURE_HEADER),
+                );
+            ResponseTemplate::new(if body_ok && signed_ok { 200 } else { 401 })
+                .set_body_json(json!({ "id": "o1" }))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = client(&server, true);
+    let response: Value = client
+        .send(
+            &Request::post("/portfolio/orders")
+                .body(json!({
+                    "ticker": "KXUPDOWN",
+                    "side": "buy",
+                    "type": "limit",
+                    "limit_price_dollars": "0.42",
+                    "size": 10
+                }))
+                .authenticated(),
+        )
+        .await
+        .expect("signed post accepted");
+    assert_eq!(response["id"], "o1");
+}
+
+#[tokio::test]
+async fn write_429_is_retried_until_success() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/orders")))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .set_body_json(json!({ "code": 429, "message": "slow down" })),
+        )
+        .up_to_n_times(2)
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/orders")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "o1" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client(&server, true);
+    let response: Value = client
+        .send(
+            &Request::post("/portfolio/orders")
+                .body(json!({ "ticker": "KXUPDOWN" }))
+                .authenticated(),
+        )
+        .await
+        .expect("eventually ok");
+    assert_eq!(response["id"], "o1");
+}
+
+#[tokio::test]
+async fn server_error_on_non_idempotent_write_is_ambiguous_and_not_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/orders")))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .set_body_json(json!({ "code": 5000, "message": "internal error" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client(&server, true);
+    let error = client
+        .send::<Value>(
+            &Request::post("/portfolio/orders")
+                .body(json!({ "ticker": "KXUPDOWN" }))
+                .authenticated(),
+        )
+        .await
+        .expect_err("ambiguous");
+    assert!(
+        matches!(&error, KalshiError::Ambiguous(detail)
+            if detail.contains("HTTP 500") && detail.contains("code 5000: internal error")),
+        "unexpected: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn connection_failure_is_ambiguous_for_writes_but_transport_for_get() {
+    let dead = furball::Client::builder()
+        .base_url("http://127.0.0.1:1/trade-api/v2")
+        .build()
+        .expect("client");
+    let error = dead
+        .send::<Value>(&Request::post("/portfolio/orders").body(json!({})))
+        .await
+        .expect_err("no connection");
+    assert!(matches!(error, KalshiError::Ambiguous(_)));
+    let error = dead
+        .send::<Value>(&Request::get("/markets"))
+        .await
+        .expect_err("no connection");
+    assert!(matches!(error, KalshiError::Transport(_)));
+}
+
+#[tokio::test]
+async fn put_and_delete_use_their_methods_and_delete_is_idempotent() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path(format!("{API_PREFIX}/portfolio/orders/o1")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "id": "o1", "state": "filled" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("{API_PREFIX}/portfolio/orders/o1")))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_json(json!({ "code": 5000, "message": "boom" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client(&server, true);
+    let put: Value = client
+        .send(
+            &Request::put("/portfolio/orders/o1")
+                .body(json!({ "size": 5 }))
+                .authenticated(),
+        )
+        .await
+        .expect("put ok");
+    assert_eq!(put["state"], "filled");
+    let error = client
+        .send::<Value>(&Request::delete("/portfolio/orders/o1").authenticated())
+        .await
+        .expect_err("500");
+    assert!(
+        matches!(error, KalshiError::Api { status, .. } if status.as_u16() == 500),
+        "idempotent write surfaces a plain error, got: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn json_error_bodies_decode_to_the_api_variant() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/orders")))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({ "code": 1023, "message": "Order must be a limit order" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/orders/garbled")))
+        .respond_with(ResponseTemplate::new(400).set_body_string("not json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client(&server, true);
+    let error = client
+        .send::<Value>(
+            &Request::post("/portfolio/orders")
+                .body(json!({}))
+                .authenticated(),
+        )
+        .await
+        .expect_err("400");
+    assert!(
+        matches!(&error,
+            KalshiError::Api { status, code, message }
+                if status.as_u16() == 400 && *code == 1023 && message == "Order must be a limit order"
+        ),
+        "unexpected: {error:?}"
+    );
+    let error = client
+        .send::<Value>(
+            &Request::post("/portfolio/orders/garbled")
+                .body(json!({}))
+                .authenticated(),
+        )
+        .await
+        .expect_err("400");
+    assert!(
+        matches!(
+            &error,
+            KalshiError::Http { status, body } if status.as_u16() == 400 && body == "not json"
+        ),
+        "unexpected: {error:?}"
     );
 }

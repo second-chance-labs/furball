@@ -3,13 +3,18 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use furball::{Client, Credentials};
 use rand::Rng;
 use rsa::RsaPrivateKey;
 use rsa::pkcs1::EncodeRsaPrivateKey;
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+use rsa::pss::{Signature, VerifyingKey};
+use rsa::signature::Verifier;
 use serde::Deserialize;
+use sha2::Sha256;
 use wiremock::MockServer;
 
 pub const KEY_ID: &str = "test-key-id-1234";
@@ -58,6 +63,24 @@ pub fn ed25519_pem() -> String {
 
 pub fn ed25519_credentials() -> Credentials {
     Credentials::from_pem(KEY_ID, &ed25519_pem()).expect("credentials")
+}
+
+pub fn verify_rsa(timestamp: &str, http_method: &str, signed_path: &str, signature: &str) -> bool {
+    let verifying_key = VerifyingKey::<Sha256>::new(private_key().to_public_key());
+    let bytes = match STANDARD.decode(signature) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+    let signature = match Signature::try_from(bytes.as_slice()) {
+        Ok(signature) => signature,
+        Err(_) => return false,
+    };
+    verifying_key
+        .verify(
+            format!("{timestamp}{http_method}{signed_path}").as_bytes(),
+            &signature,
+        )
+        .is_ok()
 }
 
 pub fn client(server: &MockServer, with_credentials: bool) -> Client {

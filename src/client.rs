@@ -4,6 +4,7 @@ use std::time::Duration;
 use rand::Rng;
 use reqwest::header::RETRY_AFTER;
 use reqwest::{Method, StatusCode};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
@@ -12,7 +13,7 @@ use url::Url;
 use crate::auth::{
     ACCESS_KEY_HEADER, ACCESS_SIGNATURE_HEADER, ACCESS_TIMESTAMP_HEADER, Credentials,
 };
-use crate::error::{KalshiError, Result};
+use crate::error::{ApiError, KalshiError, Result};
 use crate::rate_limit::{DEFAULT_COST, ReadBucket, Tier};
 use crate::routing::Cutoff;
 
@@ -26,24 +27,61 @@ pub const DEMO_URL: &str = "https://demo-api.kalshi.co/trade-api/v2";
 /// Maximum attempts for one request, counting the first.
 pub const MAX_ATTEMPTS: u32 = 5;
 
-/// One GET request: where it goes, what it costs, and whether it must be signed.
+/// One Kalshi API request: method, where it goes, what it costs, whether it must be signed,
+/// and whether it is safe to retry.
 #[derive(Debug, Clone)]
 pub struct Request {
+    pub(crate) method: Method,
     pub(crate) path: String,
     pub(crate) query: Vec<(String, String)>,
+    pub(crate) body: Option<serde_json::Value>,
     pub(crate) cost: u32,
     pub(crate) authenticated: bool,
+    pub(crate) idempotent: bool,
 }
 
 impl Request {
-    /// A public read costing the default 10 tokens. `path` is relative to the base URL and starts with `/`.
+    /// A GET read costing the default 10 tokens. `path` is relative to the base URL and starts with `/`.
+    /// Idempotent: a failure after dispatch surfaces as [`KalshiError::Transport`].
     pub fn get(path: impl Into<String>) -> Self {
+        Self::new(Method::GET, path, true)
+    }
+
+    /// A POST write costing the default 10 tokens. Not idempotent by default: a timeout,
+    /// connection failure, or HTTP 5xx surfaces as [`KalshiError::Ambiguous`] because the write
+    /// may have landed. Callers that make a POST safe to retry (for example by supplying a
+    /// `client_order_id`) should mark it idempotent.
+    pub fn post(path: impl Into<String>) -> Self {
+        Self::new(Method::POST, path, false)
+    }
+
+    /// A PUT write costing the default 10 tokens. Idempotent by method.
+    pub fn put(path: impl Into<String>) -> Self {
+        Self::new(Method::PUT, path, true)
+    }
+
+    /// A DELETE write costing the default 10 tokens. Idempotent by method.
+    pub fn delete(path: impl Into<String>) -> Self {
+        Self::new(Method::DELETE, path, true)
+    }
+
+    fn new(method: Method, path: impl Into<String>, idempotent: bool) -> Self {
         Self {
+            method,
             path: path.into(),
             query: Vec::new(),
+            body: None,
             cost: DEFAULT_COST,
             authenticated: false,
+            idempotent,
         }
+    }
+
+    /// Attaches a JSON request body. The body is never part of the signature.
+    pub fn body(mut self, body: impl Serialize) -> Self {
+        self.body =
+            Some(serde_json::to_value(body).expect("request body must be JSON-serializable"));
+        self
     }
 
     /// Adds a query parameter.
@@ -69,6 +107,13 @@ impl Request {
     /// Requires signing; fails with [`KalshiError::Auth`] when the client has no credentials.
     pub fn authenticated(mut self) -> Self {
         self.authenticated = true;
+        self
+    }
+
+    /// Sets whether the request is safe to retry after a timeout, connection failure, or
+    /// HTTP 5xx. GET, PUT and DELETE default to `true`; POST defaults to `false`.
+    pub fn idempotent(mut self, idempotent: bool) -> Self {
+        self.idempotent = idempotent;
         self
     }
 }
@@ -180,7 +225,10 @@ impl Client {
         let mut attempt = 1;
         loop {
             inner.bucket.acquire(request.cost).await;
-            let response = self.build(request)?.send().await?;
+            let response = match self.build(request)?.send().await {
+                Ok(response) => response,
+                Err(error) => return Err(transport_failure(request, error)),
+            };
             let status = response.status();
             if status == StatusCode::TOO_MANY_REQUESTS {
                 if attempt >= MAX_ATTEMPTS {
@@ -198,11 +246,21 @@ impl Client {
                 attempt += 1;
                 continue;
             }
-            let body = response.text().await?;
+            let body = match response.text().await {
+                Ok(body) => body,
+                Err(error) => return Err(transport_failure(request, error)),
+            };
             return match status {
                 status if status.is_success() => Ok(body),
                 StatusCode::NOT_FOUND => Err(KalshiError::NotFound),
-                status => Err(KalshiError::Http { status, body }),
+                status if status.is_server_error() && !request.idempotent => {
+                    Err(KalshiError::Ambiguous(format!(
+                        "Kalshi answered HTTP {} ({}); the write may have landed",
+                        status.as_u16(),
+                        error_detail(&body)
+                    )))
+                }
+                status => Err(decode_error(status, body)),
             };
         }
     }
@@ -217,7 +275,13 @@ impl Client {
         let inner = &self.inner;
         let base = inner.base.as_str().trim_end_matches('/');
         let url = format!("{base}{}", request.path);
-        let mut builder = inner.http.request(Method::GET, url).query(&request.query);
+        let mut builder = inner
+            .http
+            .request(request.method.clone(), url)
+            .query(&request.query);
+        if let Some(body) = &request.body {
+            builder = builder.json(body);
+        }
         if request.authenticated {
             let credentials = inner.credentials.as_ref().ok_or_else(|| {
                 KalshiError::Auth("endpoint requires credentials but none were configured".into())
@@ -227,7 +291,7 @@ impl Client {
                 inner.base.path().trim_end_matches('/'),
                 request.path
             );
-            let headers = credentials.sign_now("GET", &sign_path);
+            let headers = credentials.sign_now(request.method.as_str(), &sign_path);
             builder = builder
                 .header(ACCESS_KEY_HEADER, headers.key_id)
                 .header(ACCESS_TIMESTAMP_HEADER, headers.timestamp)
@@ -235,4 +299,35 @@ impl Client {
         }
         Ok(builder)
     }
+}
+
+/// A request that failed without an HTTP response: for idempotent requests that is an ordinary
+/// [`KalshiError::Transport`], for non-idempotent ones the outcome is unknown.
+fn transport_failure(request: &Request, error: reqwest::Error) -> KalshiError {
+    if request.idempotent {
+        KalshiError::from(error)
+    } else if error.is_timeout() {
+        KalshiError::Ambiguous("request timed out; the write may have landed".into())
+    } else {
+        KalshiError::Ambiguous("connection to Kalshi failed; the write may have landed".into())
+    }
+}
+
+/// Decodes a Kalshi error response: its JSON envelope when present, raw text otherwise.
+fn decode_error(status: StatusCode, body: String) -> KalshiError {
+    match serde_json::from_str::<ApiError>(&body) {
+        Ok(error) => KalshiError::Api {
+            status,
+            code: error.code,
+            message: error.message,
+        },
+        Err(_) => KalshiError::Http { status, body },
+    }
+}
+
+/// Renders an error body as `code: message` when it is a Kalshi JSON envelope, else raw text.
+fn error_detail(body: &str) -> String {
+    serde_json::from_str::<ApiError>(body)
+        .map(|error| format!("code {}: {}", error.code, error.message))
+        .unwrap_or_else(|_| body.to_owned())
 }
