@@ -1,0 +1,33 @@
+{
+  "cursor": "",
+  "settlements": [
+    {
+      "ticker": "KXHIGHNY-26OCT31-T100",
+      "exchange_index": 0,
+      "event_ticker": "KXHIGHNY",
+      "market_result": "yes",
+      "yes_count_fp": "100.00",
+      "yes_total_cost_dollars": "50.00",
+      "no_count_fp": "0.00",
+      "no_total_cost_dollars": "0.00",
+      "revenue": 10000,
+      "settled_time": "2026-11-01T00:00:00Z",
+      "fee_cost": "0.34",
+      "value": 100
+    },
+    {
+      "ticker": "KXHIGHNY-26OCT31-T96",
+      "exchange_index": 0,
+      "event_ticker": "KXHIGHNY",
+      "market_result": "no",
+      "yes_count_fp": "0.00",
+      "yes_total_cost_dollars": "0.00",
+      "no_count_fp": "100.00",
+      "no_total_cost_dollars": "50.00",
+      "revenue": 10000,
+      "settled_time": "2026-11-01T00:00:00Z",
+      "fee_cost": "0.17",
+      "value": null
+    }
+  ]
+}

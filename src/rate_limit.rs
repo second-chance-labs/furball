@@ -8,6 +8,8 @@ use governor::{Quota, RateLimiter};
 pub const DEFAULT_COST: u32 = 10;
 /// Token cost of a CF Benchmarks passthrough call.
 pub const CF_BENCHMARKS_COST: u32 = 50;
+/// Token cost of `GET /portfolio/orders/{order_id}`.
+pub const GET_ORDER_COST: u32 = 2;
 
 /// Kalshi account tier; selects the Read-bucket budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -50,6 +52,15 @@ impl Tier {
             _ => self.read_budget(),
         }
     }
+
+    /// Balance requests per second the portfolio balance bucket allows; Basic and Advanced are
+    /// limited to one, all higher tiers to five.
+    pub fn balance_budget(self) -> u32 {
+        match self {
+            Self::Basic | Self::Advanced => 1,
+            _ => 5,
+        }
+    }
 }
 
 /// Token bucket for the Read budget. One governor cell equals one Kalshi token.
@@ -73,6 +84,28 @@ impl ReadBucket {
         let cost = NonZeroU32::new(cost.min(self.capacity)).unwrap_or(NonZeroU32::MIN);
         if self.limiter.until_n_ready(cost).await.is_err() {
             tracing::error!("kalshi read bucket cannot cover request cost");
+        }
+    }
+}
+
+/// Token bucket for `GET /portfolio/balance`, separate from the Read budget. One governor cell
+/// equals one balance request, and the bucket holds one second of budget, so there is no burst.
+pub(crate) struct BalanceBucket {
+    limiter: RateLimiter<NotKeyed, InMemoryState, DefaultClock>,
+}
+
+impl BalanceBucket {
+    pub(crate) fn new(per_second: u32) -> Self {
+        let budget = NonZeroU32::new(per_second.max(1)).unwrap_or(NonZeroU32::MIN);
+        Self {
+            limiter: RateLimiter::direct(Quota::per_second(budget).allow_burst(budget)),
+        }
+    }
+
+    /// Waits until one balance request slot is free and spends it.
+    pub(crate) async fn acquire(&self) {
+        if self.limiter.until_n_ready(NonZeroU32::MIN).await.is_err() {
+            tracing::error!("kalshi balance bucket cannot cover request");
         }
     }
 }
