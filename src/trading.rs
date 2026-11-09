@@ -879,7 +879,7 @@ impl OrderBuilder {
 }
 
 /// Token cost of a batch: the sum of its per-item costs, saturating on overflow.
-fn batch_cost(items: usize, per_item: u32) -> u32 {
+pub(crate) fn batch_cost(items: usize, per_item: u32) -> u32 {
     u32::try_from(items)
         .unwrap_or(u32::MAX)
         .saturating_mul(per_item)

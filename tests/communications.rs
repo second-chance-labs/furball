@@ -8,9 +8,12 @@ use std::time::Duration;
 
 use chrono::TimeZone;
 use common::{API_PREFIX, KEY_ID, client, credentials, verify_rsa as verify};
+use furball::types::OutcomeSide;
 use furball::{
-    AcceptedSide, KalshiError, NewQuote, NewRfq, Quote, QuoteFilter, QuoteStatus, Rfq, RfqFilter,
-    RfqSize, RfqStatus, TradingClient, WriteOutcome,
+    AcceptRfqBatch, AcceptedRfqBatch, AcceptedSide, CreatedRfqBatchQuote, KalshiError, NewQuote,
+    NewRfq, NewRfqBatch, NewRfqBatchQuote, Quote, QuoteFilter, QuoteStatus, Rfq, RfqBatch,
+    RfqBatchAcceptLimit, RfqBatchChild, RfqBatchQuoteEntry, RfqBatchSize, RfqBatchStatus,
+    RfqChildSize, RfqFilter, RfqSize, RfqStatus, TickerPair, TradingClient, WriteOutcome,
 };
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
@@ -19,6 +22,9 @@ use wiremock::{Mock, MockServer, Request as MockRequest, ResponseTemplate};
 
 const RFQ_ID: &str = "0191f2c4-9a3b-7d1e-8c5f-2a6b4e8d9f01";
 const QUOTE_ID: &str = "0191f2c5-1b4c-8e2f-9d6a-3b7c5f9e0a12";
+const RFQ_BATCH_ID: &str = "0191f2c6-2c5d-8f3a-9e7b-4c8d6a0f1b23";
+const RFQ_ID_2: &str = "0191f2c7-3d6e-9a4b-8f8c-5d9e7b1a2c34";
+const BATCH_QUOTE_ID: &str = "0191f2c9-5f8a-bc6d-aab0-7fb09d3c4e56";
 
 fn fixture(name: &str) -> Value {
     let file = format!("{}/tests/fixtures/{name}.json", env!("CARGO_MANIFEST_DIR"));
@@ -73,6 +79,70 @@ fn quote_with_id(id: &str) -> Value {
     let mut value = fixture("quote");
     value["id"] = json!(id);
     value
+}
+
+fn batch_child(ticker: &str) -> RfqBatchChild {
+    RfqBatchChild {
+        market_ticker: Some(ticker.into()),
+        selected_markets: None,
+        size: None,
+    }
+}
+
+fn new_rfq_batch() -> NewRfqBatch {
+    NewRfqBatch {
+        children: vec![
+            batch_child("KXAPRIL-25FEB-YES"),
+            batch_child("KXAPRIL-25MAY-NO"),
+        ],
+        mve_collection_ticker: None,
+        size: Some(RfqBatchSize::TargetCost {
+            dollars: dec("550.0000"),
+            excludes_fees: true,
+        }),
+        replace_existing: false,
+        obscure_creator_id: false,
+        client_batch_id: Some("cb-777".into()),
+        subtrader_id: None,
+        subaccount: None,
+    }
+}
+
+fn new_rfq_batch_quote() -> NewRfqBatchQuote {
+    NewRfqBatchQuote {
+        quotes: vec![
+            RfqBatchQuoteEntry {
+                rfq_id: RFQ_ID.into(),
+                yes_bid: dec("0.5400"),
+                no_bid: dec("0.4600"),
+            },
+            RfqBatchQuoteEntry {
+                rfq_id: RFQ_ID_2.into(),
+                yes_bid: dec("0.5100"),
+                no_bid: dec("0.4900"),
+            },
+        ],
+        rest_remainder: false,
+        post_only: false,
+        subaccount: Some(2),
+    }
+}
+
+fn accept_rfq_batch() -> AcceptRfqBatch {
+    AcceptRfqBatch {
+        accepted_side: AcceptedSide::Yes,
+        min_bids: vec![
+            RfqBatchAcceptLimit {
+                rfq_id: RFQ_ID.into(),
+                bid_dollars: dec("0.5400"),
+            },
+            RfqBatchAcceptLimit {
+                rfq_id: RFQ_ID_2.into(),
+                bid_dollars: dec("0.5100"),
+            },
+        ],
+        client_order_id: Some("co-1".into()),
+    }
 }
 
 static WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -889,4 +959,546 @@ async fn halted_clients_make_zero_http_requests() {
     let outcome = client.create_rfq(&new_rfq()).await.expect("resumed");
     assert!(matches!(outcome, WriteOutcome::Sent(_)));
     assert_eq!(server.received_requests().await.expect("log").len(), 1);
+}
+
+#[test]
+fn new_rfq_batch_serializes_one_size_mode_and_children() {
+    let value = serde_json::to_value(new_rfq_batch()).expect("serialize");
+    assert_eq!(value["children"].as_array().expect("children").len(), 2);
+    assert_eq!(value["children"][0]["market_ticker"], "KXAPRIL-25FEB-YES");
+    assert_eq!(value["children"][1]["market_ticker"], "KXAPRIL-25MAY-NO");
+    assert_eq!(value["target_cost_dollars"], "550.0000");
+    assert_eq!(value["target_cost_excludes_fees"], true);
+    assert_eq!(value["rest_remainder"], false);
+    assert_eq!(value["client_batch_id"], "cb-777");
+    assert!(value.get("contracts_fp").is_none());
+    assert!(value.get("replace_existing").is_none());
+    assert!(value.get("obscure_creator_id").is_none());
+    assert!(value.get("mve_collection_ticker").is_none());
+    assert!(value.get("subtrader_id").is_none());
+    assert!(value.get("subaccount").is_none());
+
+    let mut contracts = new_rfq_batch();
+    contracts.size = Some(RfqBatchSize::Contracts(dec("1000.00")));
+    contracts.client_batch_id = None;
+    contracts.replace_existing = true;
+    let value = serde_json::to_value(&contracts).expect("serialize");
+    assert_eq!(value["contracts_fp"], "1000.00");
+    assert!(value.get("target_cost_dollars").is_none());
+    assert!(value.get("target_cost_excludes_fees").is_none());
+    assert_eq!(value["rest_remainder"], false);
+    assert!(value.get("client_batch_id").is_none());
+    assert_eq!(value["replace_existing"], true);
+
+    let mut per_child = new_rfq_batch();
+    per_child.size = None;
+    per_child.mve_collection_ticker = Some("KMVE-25".into());
+    per_child.children = vec![
+        RfqBatchChild {
+            market_ticker: Some("KXAPRIL-25FEB-YES".into()),
+            selected_markets: None,
+            size: Some(RfqChildSize::Contracts(dec("250.00"))),
+        },
+        RfqBatchChild {
+            market_ticker: None,
+            selected_markets: Some(vec![TickerPair {
+                market_ticker: "KX-1-YES".into(),
+                event_ticker: "KX-1".into(),
+                side: OutcomeSide::Yes,
+            }]),
+            size: Some(RfqChildSize::TargetCost(dec("90.00"))),
+        },
+    ];
+    let value = serde_json::to_value(&per_child).expect("serialize");
+    assert_eq!(value["mve_collection_ticker"], "KMVE-25");
+    assert!(value.get("contracts_fp").is_none());
+    assert!(value.get("target_cost_dollars").is_none());
+    assert_eq!(value["children"][0]["contracts_fp"], "250.00");
+    assert!(value["children"][0].get("target_cost_dollars").is_none());
+    assert!(value["children"][0].get("selected_markets").is_none());
+    assert!(value["children"][1].get("market_ticker").is_none());
+    assert_eq!(
+        value["children"][1]["selected_markets"][0]["market_ticker"],
+        "KX-1-YES"
+    );
+    assert_eq!(
+        value["children"][1]["selected_markets"][0]["event_ticker"],
+        "KX-1"
+    );
+    assert_eq!(value["children"][1]["selected_markets"][0]["side"], "yes");
+    assert_eq!(value["children"][1]["target_cost_dollars"], "90.00");
+}
+
+#[test]
+fn new_rfq_batch_quote_serializes_every_entry() {
+    let value = serde_json::to_value(new_rfq_batch_quote()).expect("serialize");
+    assert_eq!(value["quotes"].as_array().expect("quotes").len(), 2);
+    assert_eq!(value["quotes"][0]["rfq_id"], RFQ_ID);
+    assert_eq!(value["quotes"][0]["yes_bid"], "0.5400");
+    assert_eq!(value["quotes"][0]["no_bid"], "0.4600");
+    assert_eq!(value["quotes"][1]["rfq_id"], RFQ_ID_2);
+    assert_eq!(value["rest_remainder"], false);
+    assert_eq!(value["subaccount"], 2);
+    assert!(value.get("post_only").is_none());
+
+    let mut post_only = new_rfq_batch_quote();
+    post_only.post_only = true;
+    post_only.subaccount = None;
+    post_only.rest_remainder = true;
+    let value = serde_json::to_value(&post_only).expect("serialize");
+    assert_eq!(value["post_only"], true);
+    assert!(value.get("subaccount").is_none());
+    assert_eq!(value["rest_remainder"], true);
+}
+
+#[test]
+fn accept_rfq_batch_serializes_min_bids() {
+    let value = serde_json::to_value(accept_rfq_batch()).expect("serialize");
+    assert_eq!(value["accepted_side"], "yes");
+    assert_eq!(value["min_bids"].as_array().expect("min_bids").len(), 2);
+    assert_eq!(value["min_bids"][0]["rfq_id"], RFQ_ID);
+    assert_eq!(value["min_bids"][0]["bid_dollars"], "0.5400");
+    assert_eq!(value["min_bids"][1]["rfq_id"], RFQ_ID_2);
+    assert_eq!(value["min_bids"][1]["bid_dollars"], "0.5100");
+    assert_eq!(value["client_order_id"], "co-1");
+
+    let mut no_key = accept_rfq_batch();
+    no_key.client_order_id = None;
+    let value = serde_json::to_value(&no_key).expect("serialize");
+    assert!(value.get("client_order_id").is_none());
+}
+
+#[test]
+fn rfq_batch_status_round_trips() {
+    let open: RfqBatchStatus = serde_json::from_value(json!("open")).expect("open");
+    let accepted: RfqBatchStatus = serde_json::from_value(json!("accepted")).expect("accepted");
+    let closed: RfqBatchStatus = serde_json::from_value(json!("closed")).expect("closed");
+    let unknown: RfqBatchStatus = serde_json::from_value(json!("partly")).expect("unknown");
+    assert_eq!(open, RfqBatchStatus::Open);
+    assert_eq!(accepted, RfqBatchStatus::Accepted);
+    assert_eq!(closed, RfqBatchStatus::Closed);
+    assert_eq!(unknown, RfqBatchStatus::Other("partly".into()));
+}
+
+#[test]
+fn rfq_batch_fixture_decodes_every_field() {
+    let batch_value = fixture("created_rfq_batch")["rfq_batch"].clone();
+    let batch: RfqBatch = serde_json::from_value(batch_value).expect("decode");
+    assert_eq!(batch.rfq_batch_id, RFQ_BATCH_ID);
+    assert_eq!(batch.creator_id, "comm-creator-abc");
+    assert_eq!(batch.status, RfqBatchStatus::Open);
+    assert_eq!(
+        batch.created_ts,
+        chrono::Utc.with_ymd_and_hms(2025, 2, 11, 10, 0, 0).unwrap()
+    );
+    assert_eq!(batch.rfqs.len(), 2);
+    assert_eq!(batch.rfqs[0].rfq_id, RFQ_ID);
+    assert_eq!(batch.rfqs[1].rfq_id, RFQ_ID_2);
+    assert_eq!(batch.rfqs[0].rfq_batch_id, Some(RFQ_BATCH_ID.into()));
+    assert_eq!(
+        batch.updated_ts,
+        Some(chrono::Utc.with_ymd_and_hms(2025, 2, 11, 10, 0, 5).unwrap())
+    );
+    assert_eq!(batch.client_batch_id, Some("cb-777".into()));
+    assert_eq!(batch.creator_user_id, Some("user-creator-1".into()));
+    assert_eq!(batch.creator_subaccount, Some(1));
+    assert!(batch.accepted_ts.is_none());
+    assert!(batch.closed_ts.is_none());
+    assert!(batch.close_reason.is_none());
+}
+
+#[test]
+fn accepted_rfq_batch_fixture_decodes() {
+    let accepted: AcceptedRfqBatch =
+        serde_json::from_value(fixture("accepted_rfq_batch")).expect("decode");
+    assert_eq!(accepted.accepted_side, AcceptedSide::Yes);
+    assert_eq!(accepted.quotes.len(), 2);
+    assert_eq!(accepted.quotes[0].quote_id, QUOTE_ID);
+    assert_eq!(accepted.quotes[0].rfq_id, RFQ_ID);
+    assert_eq!(accepted.quotes[0].status, QuoteStatus::Accepted);
+    assert_eq!(accepted.quotes[0].accepted_side, Some(AcceptedSide::Yes));
+    assert_eq!(accepted.quotes[1].rfq_id, RFQ_ID_2);
+    assert_eq!(accepted.quotes[1].yes_bid_dollars, dec("0.5100"));
+}
+
+#[test]
+fn created_rfq_batch_quote_fixture_decodes() {
+    let created: CreatedRfqBatchQuote =
+        serde_json::from_value(fixture("created_rfq_batch_quote")).expect("decode");
+    assert_eq!(created.batch_quote_id, BATCH_QUOTE_ID);
+}
+
+#[tokio::test]
+async fn create_rfq_batch_sends_a_signed_request_and_decodes_the_fixture() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let created = fixture("created_rfq_batch");
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/communications/rfq_batches")))
+        .and(header_exists(furball::ACCESS_KEY_HEADER))
+        .and(header_exists(furball::ACCESS_TIMESTAMP_HEADER))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let body_ok = body["rest_remainder"] == false
+                && body["target_cost_dollars"] == "550.0000"
+                && body["target_cost_excludes_fees"] == true
+                && body["client_batch_id"] == "cb-777"
+                && body["children"].as_array().expect("children").len() == 2
+                && body["children"][0]["market_ticker"] == "KXAPRIL-25FEB-YES";
+            let signed_ok = header(furball::ACCESS_KEY_HEADER) == KEY_ID
+                && verify(
+                    &header(furball::ACCESS_TIMESTAMP_HEADER),
+                    "POST",
+                    &format!("{API_PREFIX}/communications/rfq_batches"),
+                    &header(furball::ACCESS_SIGNATURE_HEADER),
+                );
+            ResponseTemplate::new(if body_ok && signed_ok { 201 } else { 401 })
+                .set_body_json(created.clone())
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    match client
+        .create_rfq_batch(&new_rfq_batch())
+        .await
+        .expect("created")
+    {
+        WriteOutcome::Sent(batch) => {
+            assert_eq!(batch.rfq_batch_id, RFQ_BATCH_ID);
+            assert_eq!(batch.rfqs.len(), 2);
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn create_rfq_batch_without_client_batch_id_5xx_is_ambiguous() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/communications/rfq_batches")))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_json(json!({ "code": 5000, "message": "boom" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    let mut batch = new_rfq_batch();
+    batch.client_batch_id = None;
+    let error = client
+        .create_rfq_batch(&batch)
+        .await
+        .expect_err("ambiguous");
+    assert!(matches!(error, KalshiError::Ambiguous(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn delete_rfq_batch_sends_a_signed_delete() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/rfq_batches/{RFQ_BATCH_ID}"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let valid = verify(
+                &header(furball::ACCESS_TIMESTAMP_HEADER),
+                "DELETE",
+                &format!("{API_PREFIX}/communications/rfq_batches/{RFQ_BATCH_ID}"),
+                &header(furball::ACCESS_SIGNATURE_HEADER),
+            );
+            ResponseTemplate::new(if valid { 204 } else { 401 })
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    match client
+        .delete_rfq_batch(RFQ_BATCH_ID)
+        .await
+        .expect("deleted")
+    {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn accept_rfq_batch_sends_min_bids_and_decodes_the_fixture() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let accepted = fixture("accepted_rfq_batch");
+    Mock::given(method("PUT"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/rfq_batches/{RFQ_BATCH_ID}/accept"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let body_ok = body["accepted_side"] == "yes"
+                && body["min_bids"].as_array().expect("min_bids").len() == 2
+                && body["min_bids"][0]["bid_dollars"] == "0.5400"
+                && body["client_order_id"] == "co-1";
+            let signed_ok = verify(
+                &header(furball::ACCESS_TIMESTAMP_HEADER),
+                "PUT",
+                &format!("{API_PREFIX}/communications/rfq_batches/{RFQ_BATCH_ID}/accept"),
+                &header(furball::ACCESS_SIGNATURE_HEADER),
+            );
+            ResponseTemplate::new(if body_ok && signed_ok { 200 } else { 401 })
+                .set_body_json(accepted.clone())
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    match client
+        .accept_rfq_batch(RFQ_BATCH_ID, &accept_rfq_batch())
+        .await
+        .expect("accepted")
+    {
+        WriteOutcome::Sent(accepted) => {
+            assert_eq!(accepted.accepted_side, AcceptedSide::Yes);
+            assert_eq!(accepted.quotes.len(), 2);
+            assert_eq!(accepted.quotes[0].quote_id, QUOTE_ID);
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn create_rfq_batch_quote_sends_every_entry_and_decodes_the_fixture() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let created = fixture("created_rfq_batch_quote");
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/rfq_batches/{RFQ_BATCH_ID}/quotes"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let body_ok = body["quotes"].as_array().expect("quotes").len() == 2
+                && body["quotes"][0]["rfq_id"] == RFQ_ID
+                && body["quotes"][0]["yes_bid"] == "0.5400"
+                && body["rest_remainder"] == false
+                && body["subaccount"] == 2;
+            let signed_ok = verify(
+                &header(furball::ACCESS_TIMESTAMP_HEADER),
+                "POST",
+                &format!("{API_PREFIX}/communications/rfq_batches/{RFQ_BATCH_ID}/quotes"),
+                &header(furball::ACCESS_SIGNATURE_HEADER),
+            );
+            ResponseTemplate::new(if body_ok && signed_ok { 201 } else { 401 })
+                .set_body_json(created.clone())
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    match client
+        .create_rfq_batch_quote(RFQ_BATCH_ID, &new_rfq_batch_quote())
+        .await
+        .expect("created")
+    {
+        WriteOutcome::Sent(created) => assert_eq!(created.batch_quote_id, BATCH_QUOTE_ID),
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn create_rfq_batch_quote_5xx_is_a_plain_error_not_ambiguity() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/rfq_batches/{RFQ_BATCH_ID}/quotes"
+        )))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_json(json!({ "code": 5000, "message": "boom" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    let error = client
+        .create_rfq_batch_quote(RFQ_BATCH_ID, &new_rfq_batch_quote())
+        .await
+        .expect_err("idempotent write");
+    assert!(
+        matches!(error, KalshiError::Api { status, .. } if status.as_u16() == 500),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn delete_rfq_batch_quote_sends_a_signed_delete() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/rfq_batches/{RFQ_BATCH_ID}/quotes/{BATCH_QUOTE_ID}"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(|request: &MockRequest| {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let valid = verify(
+                &header(furball::ACCESS_TIMESTAMP_HEADER),
+                "DELETE",
+                &format!(
+                    "{API_PREFIX}/communications/rfq_batches/{RFQ_BATCH_ID}/quotes/{BATCH_QUOTE_ID}"
+                ),
+                &header(furball::ACCESS_SIGNATURE_HEADER),
+            );
+            ResponseTemplate::new(if valid { 204 } else { 401 })
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    match client
+        .delete_rfq_batch_quote(RFQ_BATCH_ID, BATCH_QUOTE_ID)
+        .await
+        .expect("deleted")
+    {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn confirm_rfq_batch_quote_sends_a_signed_put_without_a_body() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path(format!(
+            "{API_PREFIX}/communications/rfq_batches/{RFQ_BATCH_ID}/quotes/{BATCH_QUOTE_ID}/confirm"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(|request: &MockRequest| {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let valid = request.body.is_empty()
+                && verify(
+                    &header(furball::ACCESS_TIMESTAMP_HEADER),
+                    "PUT",
+                    &format!(
+                        "{API_PREFIX}/communications/rfq_batches/{RFQ_BATCH_ID}/quotes/{BATCH_QUOTE_ID}/confirm"
+                    ),
+                    &header(furball::ACCESS_SIGNATURE_HEADER),
+                );
+            ResponseTemplate::new(if valid { 204 } else { 401 })
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    match client
+        .confirm_rfq_batch_quote(RFQ_BATCH_ID, BATCH_QUOTE_ID)
+        .await
+        .expect("confirmed")
+    {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn dry_run_batch_writes_bill_each_child() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let client = TradingClient::builder()
+        .base_url(format!("{}{API_PREFIX}", server.uri()))
+        .backoff_base(Duration::from_millis(1))
+        .credentials(credentials())
+        .dry_run(true)
+        .build()
+        .expect("client");
+
+    match client
+        .create_rfq_batch(&new_rfq_batch())
+        .await
+        .expect("dry run")
+    {
+        WriteOutcome::DryRun(dry) => {
+            assert_eq!(dry.method, "POST");
+            assert_eq!(dry.path, "/communications/rfq_batches");
+            assert_eq!(dry.cost, 20);
+            assert_eq!(dry.body["rest_remainder"], false);
+        }
+        WriteOutcome::Sent(_) => panic!("dry run must not send"),
+    }
+    match client
+        .create_rfq_batch_quote(RFQ_BATCH_ID, &new_rfq_batch_quote())
+        .await
+        .expect("dry run")
+    {
+        WriteOutcome::DryRun(dry) => {
+            assert_eq!(dry.method, "POST");
+            assert_eq!(
+                dry.path,
+                format!("/communications/rfq_batches/{RFQ_BATCH_ID}/quotes")
+            );
+            assert_eq!(dry.cost, 20);
+            assert_eq!(dry.body["quotes"].as_array().expect("quotes").len(), 2);
+        }
+        WriteOutcome::Sent(_) => panic!("dry run must not send"),
+    }
+    assert!(server.received_requests().await.expect("log").is_empty());
 }
