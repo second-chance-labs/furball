@@ -1,0 +1,7 @@
+{
+  "default_cost": 10,
+  "endpoint_costs": [
+    { "method": "POST", "path": "/portfolio/orders/batch", "cost": 50 },
+    { "method": "GET", "path": "/cfbenchmarks/values", "cost": 50 }
+  ]
+}

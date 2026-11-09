@@ -51,6 +51,15 @@ pub enum KalshiError {
     /// querying the orders it could have created) before retrying.
     #[error("kalshi write outcome is ambiguous: {0}")]
     Ambiguous(String),
+    /// The request's declared cost exceeds the capacity of the rate bucket it draws from.
+    /// It is rejected locally and never sent.
+    #[error("request cost {cost} exceeds the rate bucket capacity {capacity}")]
+    CostExceedsBucket {
+        /// Declared request cost.
+        cost: u32,
+        /// Capacity of the bucket the request draws from.
+        capacity: u32,
+    },
     /// The request never produced an HTTP response (connection, TLS, timeout).
     #[error("kalshi transport error: {0}")]
     Transport(reqwest::Error),

@@ -422,3 +422,111 @@ async fn json_error_bodies_decode_to_the_api_variant() {
         "unexpected: {error:?}"
     );
 }
+
+#[tokio::test]
+async fn read_traffic_does_not_consume_write_tokens() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("{API_PREFIX}/markets")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/orders")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    let client = client(&server, false);
+
+    // Basic: the read bucket holds 600 and refills 200/s, so 70 reads (700 tokens) must wait
+    // for ~100 tokens of refill.
+    let reads = Instant::now();
+    for _ in 0..70 {
+        client
+            .send::<Value>(&Request::get("/markets"))
+            .await
+            .expect("read");
+    }
+    assert!(
+        reads.elapsed() >= Duration::from_millis(400),
+        "reads {:?}",
+        reads.elapsed()
+    );
+
+    // The write bucket (100/s, capacity 100) was untouched: 100 + 20 = 120 tokens wait for
+    // ~20 tokens of refill (~200 ms). Shared-bucket implementations would take far longer.
+    let writes = Instant::now();
+    client
+        .send::<Value>(&Request::post("/portfolio/orders").cost(100))
+        .await
+        .expect("write");
+    client
+        .send::<Value>(&Request::post("/portfolio/orders").cost(20))
+        .await
+        .expect("write");
+    let elapsed = writes.elapsed();
+    assert!(elapsed >= Duration::from_millis(180), "writes {elapsed:?}");
+    assert!(elapsed < Duration::from_millis(350), "writes {elapsed:?}");
+}
+
+#[tokio::test]
+async fn batch_larger_than_the_bucket_is_rejected_before_sending() {
+    let server = MockServer::start().await;
+    let client = client(&server, false);
+    let error = client
+        .send::<Value>(&Request::post("/portfolio/orders").cost(150))
+        .await
+        .expect_err("150 > 100 write capacity");
+    assert!(
+        matches!(
+            error,
+            KalshiError::CostExceedsBucket {
+                cost: 150,
+                capacity: 100
+            }
+        ),
+        "unexpected: {error:?}"
+    );
+    let error = client
+        .send::<Value>(&Request::get("/markets").cost(610))
+        .await
+        .expect_err("610 > 600 read capacity");
+    assert!(
+        matches!(
+            error,
+            KalshiError::CostExceedsBucket {
+                cost: 610,
+                capacity: 600
+            }
+        ),
+        "unexpected: {error:?}"
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recording")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn balance_requests_use_their_own_one_per_second_bucket_on_basic() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("{API_PREFIX}/account/balance")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    let client = client(&server, false);
+    let started = Instant::now();
+    client
+        .send::<Value>(&Request::get("/account/balance").cost(1).balance())
+        .await
+        .expect("first balance");
+    client
+        .send::<Value>(&Request::get("/account/balance").cost(1).balance())
+        .await
+        .expect("second balance");
+    assert!(started.elapsed() >= Duration::from_millis(900));
+}
