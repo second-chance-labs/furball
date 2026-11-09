@@ -1,0 +1,45 @@
+{
+  "cursor": "",
+  "market_positions": [
+    {
+      "ticker": "KXHIGHNY-26NOV07-T68",
+      "exchange_index": 0,
+      "total_traded_dollars": "100.00",
+      "position_fp": "50.00",
+      "market_exposure_dollars": "30.00",
+      "realized_pnl_dollars": "2.00",
+      "fees_paid_dollars": "0.50",
+      "last_updated_ts": "2026-10-20T10:00:00Z",
+      "netting_enabled": true
+    },
+    {
+      "ticker": "KXHIGHNY-26NOV07-T88",
+      "exchange_index": 0,
+      "total_traded_dollars": "60.00",
+      "position_fp": "25.00",
+      "market_exposure_dollars": "12.50",
+      "realized_pnl_dollars": "-1.00",
+      "fees_paid_dollars": "0.11",
+      "last_updated_ts": "2026-10-20T11:00:00Z",
+      "netting_enabled": true
+    }
+  ],
+  "event_positions": [
+    {
+      "event_ticker": "KXHIGHNY",
+      "total_cost_dollars": "150.00",
+      "total_cost_shares_fp": "80.00",
+      "event_exposure_dollars": "20.00",
+      "realized_pnl_dollars": "1.00",
+      "fees_paid_dollars": "0.60"
+    },
+    {
+      "event_ticker": "KXELONMARS",
+      "total_cost_dollars": "20.00",
+      "total_cost_shares_fp": "30.00",
+      "event_exposure_dollars": "-5.00",
+      "realized_pnl_dollars": "0.25",
+      "fees_paid_dollars": "0.04"
+    }
+  ]
+}

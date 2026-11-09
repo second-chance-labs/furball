@@ -3,6 +3,8 @@
 //! Money (`*_dollars`) and contract counts (`*_fp`) arrive as decimal strings and are held as
 //! [`Decimal`]; nothing here uses `f64` for money. Unknown response fields are ignored.
 
+use std::borrow::Cow;
+
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -545,6 +547,203 @@ impl From<String> for MarketResult {
             _ => Self::Other(value),
         }
     }
+}
+
+/// Status of an order, both as a response field and as the `status` filter of
+/// `GET /portfolio/orders`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "String")]
+pub enum OrderStatus {
+    /// Resting on the book; always read from the live endpoint.
+    Resting,
+    /// Canceled.
+    Canceled,
+    /// Fully executed.
+    Executed,
+    /// A status this crate does not know yet, kept verbatim.
+    Other(String),
+}
+
+impl OrderStatus {
+    /// The value sent as the `status` query parameter.
+    pub(crate) fn as_query(&self) -> Cow<'static, str> {
+        match self {
+            Self::Resting => Cow::Borrowed("resting"),
+            Self::Canceled => Cow::Borrowed("canceled"),
+            Self::Executed => Cow::Borrowed("executed"),
+            Self::Other(other) => Cow::Owned(other.clone()),
+        }
+    }
+}
+
+impl From<String> for OrderStatus {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "resting" => Self::Resting,
+            "canceled" => Self::Canceled,
+            "executed" => Self::Executed,
+            _ => Self::Other(value),
+        }
+    }
+}
+
+/// Order type.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "String")]
+pub enum OrderType {
+    /// Limit order.
+    Limit,
+    /// Market order.
+    Market,
+    /// A type this crate does not know yet, kept verbatim.
+    Other(String),
+}
+
+impl From<String> for OrderType {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "limit" => Self::Limit,
+            "market" => Self::Market,
+            _ => Self::Other(value),
+        }
+    }
+}
+
+/// Side of the book; `bid` is the buy side of the YES leg and `ask` its sell side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BookSide {
+    /// Buy side of the YES leg; same direction as `outcome_side` yes.
+    Bid,
+    /// Sell side of the YES leg; same direction as `outcome_side` no.
+    Ask,
+}
+
+/// An order, resting or completed, from the order endpoints.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Order {
+    /// Order identifier.
+    pub order_id: String,
+    /// User identifier.
+    pub user_id: String,
+    /// Client-supplied order identifier.
+    pub client_order_id: String,
+    /// Market ticker.
+    pub ticker: String,
+    /// Outcome side the order is positioned for.
+    pub outcome_side: OutcomeSide,
+    /// Book-side equivalent of `outcome_side`.
+    pub book_side: BookSide,
+    /// Order type.
+    #[serde(rename = "type")]
+    pub order_type: OrderType,
+    /// Order status.
+    pub status: OrderStatus,
+    /// Yes price in dollars.
+    pub yes_price_dollars: Decimal,
+    /// No price in dollars.
+    pub no_price_dollars: Decimal,
+    /// Contracts filled.
+    pub fill_count_fp: Decimal,
+    /// Contracts remaining.
+    pub remaining_count_fp: Decimal,
+    /// Initial size of the order, in contracts.
+    pub initial_count_fp: Decimal,
+    /// Cost of filled taker contracts, in dollars.
+    pub taker_fill_cost_dollars: Decimal,
+    /// Cost of filled maker contracts, in dollars.
+    pub maker_fill_cost_dollars: Decimal,
+    /// Fees paid on filled taker contracts, in dollars.
+    pub taker_fees_dollars: Decimal,
+    /// Fees paid on filled maker contracts, in dollars.
+    pub maker_fees_dollars: Decimal,
+    /// Expiration time, if set.
+    #[serde(default)]
+    pub expiration_time: Option<DateTime<Utc>>,
+    /// When the order was created, if known.
+    #[serde(default)]
+    pub created_time: Option<DateTime<Utc>>,
+    /// Last update to the order (modify, cancel, fill).
+    #[serde(default)]
+    pub last_update_time: Option<DateTime<Utc>>,
+    /// Order group the order belongs to, if any.
+    #[serde(default)]
+    pub order_group_id: Option<String>,
+    /// Subaccount number, if the order is on a subaccount.
+    #[serde(default)]
+    pub subaccount_number: Option<u32>,
+    /// Exchange shard.
+    #[serde(default)]
+    pub exchange_index: Option<u32>,
+}
+
+/// Response of `GET /portfolio/orders/{order_id}`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OrderResponse {
+    /// The order.
+    pub order: Order,
+}
+
+/// A fill: one match of the user's order against the book, from the fills endpoints.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Fill {
+    /// Fill identifier.
+    pub fill_id: String,
+    /// Exchange shard.
+    pub exchange_index: u32,
+    /// Trade identifier; legacy field name, same as `fill_id`.
+    pub trade_id: String,
+    /// Order that produced the fill.
+    pub order_id: String,
+    /// Market ticker.
+    pub ticker: String,
+    /// Market ticker; legacy field name, same as `ticker`.
+    pub market_ticker: String,
+    /// Outcome side the fill positioned the user for.
+    pub outcome_side: OutcomeSide,
+    /// Book-side equivalent of `outcome_side`.
+    pub book_side: BookSide,
+    /// Contracts bought or sold in this fill.
+    pub count_fp: Decimal,
+    /// Fill price for the yes side, in dollars.
+    pub yes_price_dollars: Decimal,
+    /// Fill price for the no side, in dollars.
+    pub no_price_dollars: Decimal,
+    /// Whether the fill took liquidity from the book.
+    pub is_taker: bool,
+    /// Fee cost, in dollars.
+    pub fee_cost: Decimal,
+    /// When the fill executed.
+    #[serde(default)]
+    pub created_time: Option<DateTime<Utc>>,
+    /// Subaccount number, present for direct users.
+    #[serde(default)]
+    pub subaccount_number: Option<u32>,
+}
+
+/// Queue position of one resting order.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OrderQueuePosition {
+    /// Order identifier.
+    pub order_id: String,
+    /// Market ticker.
+    pub market_ticker: String,
+    /// Contracts ahead of the order in the queue, under price-time priority.
+    pub queue_position_fp: Decimal,
+}
+
+/// Response of `GET /portfolio/orders/{order_id}/queue_position`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OrderQueuePositionResponse {
+    /// Contracts ahead of the order in the queue.
+    pub queue_position_fp: Decimal,
+}
+
+/// Response of `GET /portfolio/orders/queue_positions`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OrderQueuePositionsResponse {
+    /// Queue positions of all matching resting orders.
+    pub queue_positions: Vec<OrderQueuePosition>,
 }
 
 /// A settlement record from `GET /portfolio/settlements`.
