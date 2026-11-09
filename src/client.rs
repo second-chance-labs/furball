@@ -11,7 +11,7 @@ use tokio::time::Instant;
 use url::Url;
 
 use crate::auth::{
-    ACCESS_KEY_HEADER, ACCESS_SIGNATURE_HEADER, ACCESS_TIMESTAMP_HEADER, Credentials,
+    ACCESS_KEY_HEADER, ACCESS_SIGNATURE_HEADER, ACCESS_TIMESTAMP_HEADER, Credentials, SignedHeaders,
 };
 use crate::error::{ApiError, KalshiError, Result};
 use crate::rate_limit::{BucketKind, DEFAULT_COST, Tier, TokenBucket};
@@ -310,21 +310,28 @@ impl Client {
             builder = builder.json(body);
         }
         if request.authenticated {
-            let credentials = inner.credentials.as_ref().ok_or_else(|| {
-                KalshiError::Auth("endpoint requires credentials but none were configured".into())
-            })?;
-            let sign_path = format!(
-                "{}{}",
-                inner.base.path().trim_end_matches('/'),
-                request.path
-            );
-            let headers = credentials.sign_now(request.method.as_str(), &sign_path);
+            let headers = self.signed_headers(request)?;
             builder = builder
                 .header(ACCESS_KEY_HEADER, headers.key_id)
                 .header(ACCESS_TIMESTAMP_HEADER, headers.timestamp)
                 .header(ACCESS_SIGNATURE_HEADER, headers.signature);
         }
         Ok(builder)
+    }
+
+    /// Computes the auth headers for `request`; fails with [`KalshiError::Auth`] when the client
+    /// has no credentials. The body is never part of the signature.
+    pub(crate) fn signed_headers(&self, request: &Request) -> Result<SignedHeaders> {
+        let inner = &self.inner;
+        let credentials = inner.credentials.as_ref().ok_or_else(|| {
+            KalshiError::Auth("endpoint requires credentials but none were configured".into())
+        })?;
+        let sign_path = format!(
+            "{}{}",
+            inner.base.path().trim_end_matches('/'),
+            request.path
+        );
+        Ok(credentials.sign_now(request.method.as_str(), &sign_path))
     }
 }
 
