@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::Credentials;
 use crate::client::{Client, ClientBuilder, DEMO_URL, PRODUCTION_URL, Request};
 use crate::error::{KalshiError, Result};
-use crate::rate_limit::Tier;
+use crate::rate_limit::{BATCH_CANCEL_COST, DEFAULT_COST, Tier};
 
 /// Global kill switch shared by every [`TradingClient`] in the process.
 static HALTED: AtomicBool = AtomicBool::new(false);
@@ -274,6 +274,64 @@ impl TradingClient {
             .body(amount)
             .authenticated();
         self.write(request, String::new(), None).await
+    }
+
+    /// `POST /portfolio/events/orders/batched`: create several orders in one request.
+    ///
+    /// Billed [`DEFAULT_COST`] tokens per item: the whole batch must fit in the Write bucket's
+    /// capacity, otherwise the request is rejected locally with
+    /// [`KalshiError::CostExceedsBucket`] before anything is sent. The response has one
+    /// [`BatchCreateResult`] per item; failed items carry `error` while successful items are
+    /// reported normally. Idempotent (safe to retry) only when every item has a
+    /// `client_order_id`; otherwise a failure after dispatch surfaces as
+    /// [`KalshiError::Ambiguous`].
+    pub async fn batch_create_orders(
+        &self,
+        orders: &[CreateOrderV2],
+    ) -> Result<WriteOutcome<Vec<BatchCreateResult>>> {
+        let mut request = Request::post("/portfolio/events/orders/batched")
+            .body(BatchCreateBody {
+                orders: orders.to_vec(),
+            })
+            .authenticated()
+            .cost(batch_cost(orders.len(), DEFAULT_COST));
+        if orders.iter().all(|order| order.client_order_id.is_some()) {
+            request = request.idempotent(true);
+        }
+        let ticker = orders
+            .first()
+            .map(|order| order.ticker.clone())
+            .unwrap_or_default();
+        let outcome: WriteOutcome<BatchCreateResponse> = self.write(request, ticker, None).await?;
+        Ok(match outcome {
+            WriteOutcome::Sent(response) => WriteOutcome::Sent(response.orders),
+            WriteOutcome::DryRun(dry) => WriteOutcome::DryRun(dry),
+        })
+    }
+
+    /// `DELETE /portfolio/events/orders/batched`: cancel several orders in one request.
+    ///
+    /// Billed [`BATCH_CANCEL_COST`] tokens per item: the whole batch must fit in the Write
+    /// bucket's capacity, otherwise the request is rejected locally with
+    /// [`KalshiError::CostExceedsBucket`] before anything is sent. The response has one
+    /// [`BatchCancelResult`] per item; failed items carry `error` while successful items are
+    /// reported normally.
+    pub async fn batch_cancel_orders(
+        &self,
+        orders: &[BatchCancelOrder],
+    ) -> Result<WriteOutcome<Vec<BatchCancelResult>>> {
+        let request = Request::delete("/portfolio/events/orders/batched")
+            .body(BatchCancelBody {
+                orders: orders.to_vec(),
+            })
+            .authenticated()
+            .cost(batch_cost(orders.len(), BATCH_CANCEL_COST));
+        let outcome: WriteOutcome<BatchCancelResponse> =
+            self.write(request, String::new(), None).await?;
+        Ok(match outcome {
+            WriteOutcome::Sent(response) => WriteOutcome::Sent(response.orders),
+            WriteOutcome::DryRun(dry) => WriteOutcome::DryRun(dry),
+        })
     }
 
     async fn write<T: DeserializeOwned>(
@@ -561,6 +619,13 @@ impl OrderBuilder {
     }
 }
 
+/// Token cost of a batch: the sum of its per-item costs, saturating on overflow.
+fn batch_cost(items: usize, per_item: u32) -> u32 {
+    u32::try_from(items)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(per_item)
+}
+
 /// A version-4 UUID formatted as a client order id.
 fn random_client_order_id() -> String {
     let mut bytes = [0u8; 16];
@@ -758,4 +823,119 @@ pub struct DecreasedOrder {
     pub remaining_count: Decimal,
     /// Engine timestamp, Unix milliseconds.
     pub ts_ms: i64,
+}
+
+#[derive(Serialize)]
+struct BatchCreateBody {
+    orders: Vec<CreateOrderV2>,
+}
+
+#[derive(Deserialize)]
+struct BatchCreateResponse {
+    orders: Vec<BatchCreateResult>,
+}
+
+#[derive(Serialize)]
+struct BatchCancelBody {
+    orders: Vec<BatchCancelOrder>,
+}
+
+#[derive(Deserialize)]
+struct BatchCancelResponse {
+    orders: Vec<BatchCancelResult>,
+}
+
+/// One entry of a `DELETE /portfolio/events/orders/batched` request.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BatchCancelOrder {
+    /// Kalshi order id to cancel.
+    pub order_id: String,
+    /// Subaccount the order is on, 0 for the primary account; omitted uses the key's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subaccount: Option<u32>,
+    /// Exchange shard; omitted auto-routes when `market_ticker` is set, otherwise defaults to 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exchange_index: Option<u32>,
+    /// Market ticker; required for auto-routing when `exchange_index` is omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub market_ticker: Option<String>,
+}
+
+/// One result of `POST /portfolio/events/orders/batched`: exactly one per requested item, in
+/// request order. A failed item carries [`Self::error`] and no order fields; a successful item
+/// carries the order fields and no error.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BatchCreateResult {
+    /// Kalshi order id; present when the item was accepted.
+    #[serde(default)]
+    pub order_id: Option<String>,
+    /// The client order id, when the item had one.
+    #[serde(default)]
+    pub client_order_id: Option<String>,
+    /// Contracts filled immediately; present when the item was accepted.
+    #[serde(default, deserialize_with = "optional_decimal_from_string")]
+    pub fill_count: Option<Decimal>,
+    /// Contracts remaining after placement; present when the item was accepted.
+    #[serde(default, deserialize_with = "optional_decimal_from_string")]
+    pub remaining_count: Option<Decimal>,
+    /// Volume-weighted average fill price; present when fills occurred.
+    #[serde(default, deserialize_with = "optional_decimal_from_string")]
+    pub average_fill_price: Option<Decimal>,
+    /// Volume-weighted average fee per contract; present when fills occurred.
+    #[serde(default, deserialize_with = "optional_decimal_from_string")]
+    pub average_fee_paid: Option<Decimal>,
+    /// Engine timestamp, Unix milliseconds; absent when the item errored.
+    #[serde(default)]
+    pub ts_ms: Option<i64>,
+    /// Kalshi's error for this item; present when the item failed.
+    #[serde(default)]
+    pub error: Option<BatchItemError>,
+}
+
+/// One result of `DELETE /portfolio/events/orders/batched`: exactly one per requested item, in
+/// request order.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BatchCancelResult {
+    /// Kalshi order id.
+    pub order_id: String,
+    /// The client order id, when present.
+    #[serde(default)]
+    pub client_order_id: Option<String>,
+    /// Contracts the cancel removed; zero when the item errored.
+    #[serde(deserialize_with = "decimal_from_string")]
+    pub reduced_by: Decimal,
+    /// Engine timestamp, Unix milliseconds; absent when the item errored.
+    #[serde(default)]
+    pub ts_ms: Option<i64>,
+    /// Kalshi's error for this item; present when the item failed.
+    #[serde(default)]
+    pub error: Option<BatchItemError>,
+}
+
+/// Kalshi's per-item error in a batch order response.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BatchItemError {
+    /// Kalshi's numeric error code; numeric strings are accepted as well.
+    #[serde(deserialize_with = "item_error_code")]
+    pub code: i64,
+    /// Kalshi's error message.
+    pub message: String,
+}
+
+/// Decodes a batch item error code: a JSON number, or a string that parses as one.
+fn item_error_code<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<i64, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(number) => number
+            .as_i64()
+            .ok_or_else(|| serde::de::Error::custom("error code is not an integer")),
+        serde_json::Value::String(text) => text
+            .parse()
+            .map_err(|_| serde::de::Error::custom(format!("error code is not a number: {text}"))),
+        other => Err(serde::de::Error::custom(format!(
+            "error code is not a number: {other:?}"
+        ))),
+    }
 }
