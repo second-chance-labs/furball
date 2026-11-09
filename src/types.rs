@@ -1,4 +1,4 @@
-//! Typed responses for Kalshi's market-data endpoints.
+//! Typed responses for Kalshi's market-data and portfolio endpoints.
 //!
 //! Money (`*_dollars`) and contract counts (`*_fp`) arrive as decimal strings and are held as
 //! [`Decimal`]; nothing here uses `f64` for money. Unknown response fields are ignored.
@@ -397,4 +397,182 @@ pub struct OrderbookResponse {
 pub struct CfBenchmarksResponse {
     /// Raw CF Benchmarks payload.
     pub data: serde_json::Value,
+}
+
+/// Balance and portfolio value of one account, from `GET /portfolio/balance`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Balance {
+    /// Available balance in cents, across all exchange shards unless one was requested.
+    pub balance: i64,
+    /// Available balance in dollars.
+    pub balance_dollars: Decimal,
+    /// Portfolio value in cents.
+    pub portfolio_value: i64,
+    /// Unix timestamp of the last balance update.
+    pub updated_ts: i64,
+    /// Balance per exchange shard; omitted for subaccount-restricted API keys.
+    #[serde(default)]
+    pub balance_breakdown: Option<Vec<IndexedBalance>>,
+}
+
+/// Balance of one exchange shard.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct IndexedBalance {
+    /// Exchange shard the balance is held on.
+    pub exchange_index: u32,
+    /// Balance in dollars.
+    pub balance: Decimal,
+}
+
+/// Balance of one subaccount on one exchange shard.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SubaccountBalance {
+    /// Subaccount number, 0 for the primary account.
+    pub subaccount_number: u32,
+    /// Exchange shard the balance is held on.
+    pub exchange_index: u32,
+    /// Balance in dollars.
+    pub balance: Decimal,
+    /// Unix timestamp of the last balance update.
+    pub updated_ts: i64,
+}
+
+/// Response of `GET /portfolio/subaccounts/balances`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SubaccountBalancesResponse {
+    /// One entry per subaccount and exchange shard, including the primary account.
+    pub subaccount_balances: Vec<SubaccountBalance>,
+}
+
+/// Market-level position from `GET /portfolio/positions`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct MarketPosition {
+    /// Market ticker.
+    pub ticker: String,
+    /// Exchange shard.
+    pub exchange_index: u32,
+    /// Total spent trading this market, in dollars; not the remaining position's cost.
+    pub total_traded_dollars: Decimal,
+    /// Signed net contracts: positive for YES, negative for NO, zero for flat.
+    pub position_fp: Decimal,
+    /// Cost basis of the remaining position, in dollars; not its current market value.
+    pub market_exposure_dollars: Decimal,
+    /// Locked-in profit and loss, in dollars.
+    pub realized_pnl_dollars: Decimal,
+    /// Fees paid on fills, in dollars.
+    pub fees_paid_dollars: Decimal,
+    /// When the position last changed.
+    pub last_updated_ts: DateTime<Utc>,
+    /// Whether netting applies to this position's event.
+    pub netting_enabled: bool,
+}
+
+/// Event-level aggregate position from `GET /portfolio/positions`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct EventPosition {
+    /// Event ticker.
+    pub event_ticker: String,
+    /// Total spent on this event, in dollars.
+    pub total_cost_dollars: Decimal,
+    /// Total shares traded on the event, YES and NO combined.
+    pub total_cost_shares_fp: Decimal,
+    /// Cost of the aggregate event position, in dollars.
+    pub event_exposure_dollars: Decimal,
+    /// Locked-in profit and loss, in dollars.
+    pub realized_pnl_dollars: Decimal,
+    /// Fees paid on fills, in dollars.
+    pub fees_paid_dollars: Decimal,
+}
+
+/// One page of `GET /portfolio/positions`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PositionsPage {
+    /// Market positions on this page.
+    pub market_positions: Vec<MarketPosition>,
+    /// Event positions on this page.
+    pub event_positions: Vec<EventPosition>,
+    /// Cursor for the next page; empty or absent when the list is exhausted.
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// Market and event positions returned by `GET /portfolio/positions`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Positions {
+    /// Market-level positions.
+    pub market_positions: Vec<MarketPosition>,
+    /// Event-level positions.
+    pub event_positions: Vec<EventPosition>,
+}
+
+impl Positions {
+    /// Total number of positions, market plus event.
+    pub fn len(&self) -> usize {
+        self.market_positions.len() + self.event_positions.len()
+    }
+
+    /// Whether the result holds no positions at all.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub(crate) fn extend(&mut self, market: Vec<MarketPosition>, event: Vec<EventPosition>) {
+        self.market_positions.extend(market);
+        self.event_positions.extend(event);
+    }
+}
+
+/// Outcome of a settled market.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "String")]
+pub enum MarketResult {
+    /// Resolved yes.
+    Yes,
+    /// Resolved no.
+    No,
+    /// Scalar market settled at a value.
+    Scalar,
+    /// A result this crate does not know yet, kept verbatim.
+    Other(String),
+}
+
+impl From<String> for MarketResult {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "yes" => Self::Yes,
+            "no" => Self::No,
+            "scalar" => Self::Scalar,
+            _ => Self::Other(value),
+        }
+    }
+}
+
+/// A settlement record from `GET /portfolio/settlements`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Settlement {
+    /// Ticker of the settled market.
+    pub ticker: String,
+    /// Exchange shard.
+    pub exchange_index: u32,
+    /// Ticker of the market's event.
+    pub event_ticker: String,
+    /// Settlement outcome.
+    pub market_result: MarketResult,
+    /// YES contracts owned at settlement.
+    pub yes_count_fp: Decimal,
+    /// Cost basis of the YES contracts, in dollars.
+    pub yes_total_cost_dollars: Decimal,
+    /// NO contracts owned at settlement.
+    pub no_count_fp: Decimal,
+    /// Cost basis of the NO contracts, in dollars.
+    pub no_total_cost_dollars: Decimal,
+    /// Revenue from this settlement, in cents; winning contracts pay out 100 cents each.
+    pub revenue: i64,
+    /// When the market settled and payouts were processed.
+    pub settled_time: DateTime<Utc>,
+    /// Fees paid, in dollars.
+    pub fee_cost: Decimal,
+    /// Payout of a single yes contract, in cents, if the market paid out.
+    #[serde(default)]
+    pub value: Option<i64>,
 }

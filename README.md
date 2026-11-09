@@ -6,6 +6,7 @@ A read-only Rust SDK for [Kalshi's Trade API v2](https://docs.kalshi.com). No tr
 - Token-bucket rate limiting sized by account tier, with retry on HTTP 429 (exponential backoff, jitter, `Retry-After`).
 - Cursor pagination as a lazy `Stream`.
 - Transparent routing between live and historical endpoints (markets, candlesticks, trades) using the cached `/historical/cutoff`.
+- Authenticated portfolio reads: balance (its own per-second bucket), positions, settlements, subaccount balances.
 - Typed responses; money and counts are `rust_decimal::Decimal`, never `f64`.
 - Fee schedule builder: series fees and event overrides as non-overlapping intervals.
 

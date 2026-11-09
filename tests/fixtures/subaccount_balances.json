@@ -1,0 +1,7 @@
+{
+  "subaccount_balances": [
+    { "subaccount_number": 0, "exchange_index": 0, "balance": "1234567.89", "updated_ts": 1761785148 },
+    { "subaccount_number": 1, "exchange_index": 0, "balance": "42.00", "updated_ts": 1761700000 },
+    { "subaccount_number": 0, "exchange_index": 1, "balance": "0.00", "updated_ts": 1761700000 }
+  ]
+}
