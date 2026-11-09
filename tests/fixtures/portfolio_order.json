@@ -1,0 +1,21 @@
+{
+  "order_id": "o-confirm",
+  "user_id": "u1",
+  "client_order_id": "c-confirm",
+  "ticker": "KXUPDOWN-25DEC",
+  "outcome_side": "yes",
+  "book_side": "bid",
+  "type": "limit",
+  "status": "resting",
+  "yes_price_dollars": "0.55",
+  "no_price_dollars": "0.45",
+  "fill_count_fp": "5",
+  "remaining_count_fp": "5",
+  "initial_count_fp": "10",
+  "taker_fill_cost_dollars": "0",
+  "maker_fill_cost_dollars": "2.75",
+  "taker_fees_dollars": "0",
+  "maker_fees_dollars": "0.05",
+  "created_time": "2026-11-01T11:00:00Z",
+  "last_update_time": "2026-11-01T11:05:00Z"
+}
