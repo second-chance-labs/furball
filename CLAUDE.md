@@ -1,25 +1,22 @@
 # CLAUDE.md
 
-## Workflow
+# Code standards
 
-Issues and epics are driven by the tokenmaxer scripts (`tokenmaxer/scripts/github/`) and skills:
-
-- `/do-issue {n}` — start issue, create branch, implement, open PR
-- `/do-epic {n}` — complete an epic's subissues in order, then open a PR back to main
-- `/do-create-issue`, `/do-create-epic` — create issues / epics with linked subissues
-- `/do-close-pr` — merge a PR once reviews and checks pass
-
-Conventions the scripts enforce:
-
-- Branch: `{issue-label}/{summary}` off `main`, or off `epic/{epic-slug}` when the issue has a parent
-- PR title: `{issue-label}: {summary} - closes #{issue-number}`
-- Plain merge (no squash), delete branch after merge
-- Run scripts from the repository root; `gh` and `jq` are required
-
-## Crate conventions
-
-- MIT licensed.
-- Read-only first: no trading (order/position) endpoints; add them only with explicit intent.
+- Code should be self-explanatory.
+- Never use comments, with the following exceptions: 1) docstrings, and 2) reasoning that would not be explainable by code alone.
+- Minimize libraries, frameworks, tools, and services used.
+- Write tests that would intentionally break your work.
 - Money and counts are `rust_decimal::Decimal`, never `f64`.
 - Credentials (API key id, private key) never appear in `Debug` output or error messages.
 - Public library: every public item needs rustdoc.
+
+# Documentation
+
+- Minimize external documentation. Use inline documentation as much as possible.
+- When documenting separately from code, utilize Mermaid diagrams (or simple ASCII diagrams) rather than explaining topics in-text.
+
+# GitHub
+
+- Never squash-merge a PR. Always merge or rebase.
+- Always include a mermaid diagram with your PRs describing the high/medium level architecture of what was implemented.
+- Always use conventional commits.
