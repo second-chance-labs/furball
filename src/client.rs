@@ -13,7 +13,7 @@ use crate::auth::{
     ACCESS_KEY_HEADER, ACCESS_SIGNATURE_HEADER, ACCESS_TIMESTAMP_HEADER, Credentials,
 };
 use crate::error::{KalshiError, Result};
-use crate::rate_limit::{DEFAULT_COST, ReadBucket, Tier};
+use crate::rate_limit::{BalanceBucket, DEFAULT_COST, ReadBucket, Tier};
 use crate::routing::Cutoff;
 
 /// Production base URL.
@@ -33,6 +33,7 @@ pub struct Request {
     pub(crate) query: Vec<(String, String)>,
     pub(crate) cost: u32,
     pub(crate) authenticated: bool,
+    pub(crate) balance: bool,
 }
 
 impl Request {
@@ -43,6 +44,7 @@ impl Request {
             query: Vec::new(),
             cost: DEFAULT_COST,
             authenticated: false,
+            balance: false,
         }
     }
 
@@ -69,6 +71,13 @@ impl Request {
     /// Requires signing; fails with [`KalshiError::Auth`] when the client has no credentials.
     pub fn authenticated(mut self) -> Self {
         self.authenticated = true;
+        self
+    }
+
+    /// Throttles the request with the portfolio balance bucket ([`Tier::balance_budget`] requests
+    /// per second) instead of the Read budget; the two budgets never draw from each other.
+    pub fn balance(mut self) -> Self {
+        self.balance = true;
         self
     }
 }
@@ -139,6 +148,7 @@ impl ClientBuilder {
                 base,
                 credentials: self.credentials,
                 bucket: ReadBucket::new(self.tier.read_budget(), self.tier.read_capacity()),
+                balance_bucket: BalanceBucket::new(self.tier.balance_budget()),
                 backoff_base: self.backoff_base,
                 cutoff_ttl: self.cutoff_ttl,
                 cutoff: Mutex::new(None),
@@ -152,6 +162,7 @@ pub(crate) struct Inner {
     base: Url,
     credentials: Option<Credentials>,
     bucket: ReadBucket,
+    balance_bucket: BalanceBucket,
     backoff_base: Duration,
     pub(crate) cutoff_ttl: Duration,
     pub(crate) cutoff: Mutex<Option<(Instant, Cutoff)>>,
@@ -179,7 +190,11 @@ impl Client {
         let inner = &self.inner;
         let mut attempt = 1;
         loop {
-            inner.bucket.acquire(request.cost).await;
+            if request.balance {
+                inner.balance_bucket.acquire().await;
+            } else {
+                inner.bucket.acquire(request.cost).await;
+            }
             let response = self.build(request)?.send().await?;
             let status = response.status();
             if status == StatusCode::TOO_MANY_REQUESTS {
