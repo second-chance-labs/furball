@@ -2,32 +2,19 @@ mod common;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use common::verify_rsa as verify;
 use common::{
     API_PREFIX, KEY_ID, client, client_with, credentials, ed25519_credentials, ed25519_key,
-    ed25519_pem, pem, pkcs1_pem, private_key,
+    ed25519_pem, pem, pkcs1_pem,
 };
 use ed25519_dalek::Verifier;
 use furball::{
     ACCESS_KEY_HEADER, ACCESS_SIGNATURE_HEADER, ACCESS_TIMESTAMP_HEADER, Credentials, KalshiError,
     KeyType, Request,
 };
-use rsa::pss::{Signature, VerifyingKey};
 use serde_json::Value;
-use sha2::Sha256;
 use wiremock::matchers::{header_exists, method, path};
 use wiremock::{Mock, MockServer, Request as MockRequest, ResponseTemplate};
-
-fn verify(timestamp: &str, http_method: &str, signed_path: &str, signature: &str) -> bool {
-    let verifying_key = VerifyingKey::<Sha256>::new(private_key().to_public_key());
-    let bytes = STANDARD.decode(signature).expect("base64");
-    let signature = Signature::try_from(bytes.as_slice()).expect("signature bytes");
-    verifying_key
-        .verify(
-            format!("{timestamp}{http_method}{signed_path}").as_bytes(),
-            &signature,
-        )
-        .is_ok()
-}
 
 fn verify_ed(timestamp: &str, http_method: &str, signed_path: &str, signature: &str) -> bool {
     let bytes = STANDARD.decode(signature).expect("base64");
