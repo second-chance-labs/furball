@@ -29,14 +29,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::{Client, Request};
 use crate::error::Result;
-use crate::types::{decimal_from_string, optional_decimal_from_string};
+use crate::types::{OutcomeSide, decimal_from_string, optional_decimal_from_string};
 
 #[cfg(feature = "trading")]
 use crate::rate_limit::DEFAULT_COST;
 #[cfg(feature = "trading")]
 use crate::trading::{TradingClient, WriteOutcome, batch_cost};
-#[cfg(feature = "trading")]
-use crate::types::OutcomeSide;
 #[cfg(feature = "trading")]
 use crate::types::decimal_as_string;
 
@@ -1089,5 +1087,261 @@ impl TradingClient {
             None,
         )
         .await
+    }
+}
+
+/// State of a block trade proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "String")]
+pub enum BlockTradeProposalStatus {
+    /// Pending: the proposal has been made and awaits both sides' acceptance.
+    Pending,
+    /// Executed: both sides accepted and the trade settled.
+    Executed,
+    /// Cancelled: the proposer withdrew it, or it expired.
+    Cancelled,
+    /// Rejected: a counterparty rejected it.
+    Rejected,
+    /// A status this crate does not know yet, kept verbatim.
+    Other(String),
+}
+
+impl From<String> for BlockTradeProposalStatus {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "pending" => Self::Pending,
+            "executed" => Self::Executed,
+            "cancelled" => Self::Cancelled,
+            "rejected" => Self::Rejected,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+impl BlockTradeProposalStatus {
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Pending => "pending",
+            Self::Executed => "executed",
+            Self::Cancelled => "cancelled",
+            Self::Rejected => "rejected",
+            Self::Other(other) => other,
+        }
+    }
+}
+
+/// A block trade proposal, as returned by `GET /communications/block-trade-proposals`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BlockTradeProposal {
+    /// Unique identifier of the proposal; pass it unchanged to the proposal endpoints.
+    #[serde(rename = "id")]
+    pub proposal_id: String,
+    /// User id of the proposal creator.
+    pub proposer_user_id: String,
+    /// User id of the buyer; empty when the authenticated user is not the buyer.
+    pub buyer_user_id: String,
+    /// Subtrader id of the buyer; empty when the authenticated user is not the buyer.
+    #[serde(default)]
+    pub buyer_subtrader_id: Option<String>,
+    /// User id of the seller; empty when the authenticated user is not the seller.
+    pub seller_user_id: String,
+    /// Subtrader id of the seller; empty when the authenticated user is not the seller.
+    #[serde(default)]
+    pub seller_subtrader_id: Option<String>,
+    /// Market ticker of the trade.
+    pub market_ticker: String,
+    /// Price in centi-cents, one ten-thousandth of a dollar.
+    pub price_centi_cents: i64,
+    /// Number of contracts in centicounts, one one-hundredth of a contract.
+    pub centicount: i64,
+    /// The maker side of the trade.
+    pub maker_side: OutcomeSide,
+    /// When the proposal expires.
+    pub expiration_ts: DateTime<Utc>,
+    /// Current state of the proposal.
+    pub status: BlockTradeProposalStatus,
+    /// When the proposal was created.
+    pub created_ts: DateTime<Utc>,
+    /// When the proposal was last updated.
+    pub updated_ts: DateTime<Utc>,
+    /// Whether the buyer has accepted the proposal.
+    pub buyer_accepted: bool,
+    /// Whether the seller has accepted the proposal.
+    pub seller_accepted: bool,
+    /// When the buyer accepted.
+    #[serde(default)]
+    pub buyer_accepted_ts: Option<DateTime<Utc>>,
+    /// When the seller accepted.
+    #[serde(default)]
+    pub seller_accepted_ts: Option<DateTime<Utc>>,
+    /// When the proposal executed.
+    #[serde(default)]
+    pub executed_ts: Option<DateTime<Utc>>,
+    /// Order id of the buyer after execution.
+    #[serde(default)]
+    pub buyer_order_id: Option<String>,
+    /// Order id of the seller after execution.
+    #[serde(default)]
+    pub seller_order_id: Option<String>,
+}
+
+/// Filters for `GET /communications/block-trade-proposals`.
+#[derive(Debug, Clone, Default)]
+pub struct BlockTradeProposalFilter {
+    /// Market ticker.
+    pub market_ticker: Option<String>,
+    /// Proposal state.
+    pub status: Option<BlockTradeProposalStatus>,
+}
+
+impl BlockTradeProposalFilter {
+    fn apply(&self) -> Request {
+        Request::get("/communications/block-trade-proposals")
+            .query_opt("market_ticker", self.market_ticker.as_deref())
+            .query_opt(
+                "status",
+                self.status.as_ref().map(BlockTradeProposalStatus::as_str),
+            )
+            .authenticated()
+    }
+}
+
+impl Client {
+    /// `GET /communications/block-trade-proposals`: proposals visible to the authenticated user,
+    /// following cursors until the list is exhausted or at most `max_items` have been collected.
+    /// Needs credentials.
+    pub async fn list_block_trade_proposals(
+        &self,
+        filter: &BlockTradeProposalFilter,
+        limit: u32,
+        max_items: usize,
+    ) -> Result<Vec<BlockTradeProposal>> {
+        self.paginate(filter.apply(), "block_trade_proposals", limit, max_items)
+            .try_collect()
+            .await
+    }
+}
+
+/// A block trade proposal to create, for `POST /communications/block-trade-proposals`.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, Serialize)]
+pub struct ProposeBlockTrade {
+    /// User id of the buyer.
+    pub buyer_user_id: String,
+    /// Subtrader id of the buyer; provide this or `buyer_subaccount`, not both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buyer_subtrader_id: Option<String>,
+    /// Buyer subaccount number, 0 for the primary account; provide this or
+    /// `buyer_subtrader_id`, not both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buyer_subaccount: Option<u32>,
+    /// User id of the seller.
+    pub seller_user_id: String,
+    /// Subtrader id of the seller; provide this or `seller_subaccount`, not both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seller_subtrader_id: Option<String>,
+    /// Seller subaccount number, 0 for the primary account; provide this or
+    /// `seller_subtrader_id`, not both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seller_subaccount: Option<u32>,
+    /// Market ticker of the trade.
+    pub market_ticker: String,
+    /// Price in centi-cents, one ten-thousandth of a dollar.
+    pub price_centi_cents: i64,
+    /// Number of contracts in centicounts, one one-hundredth of a contract.
+    pub centicount: i64,
+    /// The maker side of the trade.
+    pub maker_side: OutcomeSide,
+    /// When the proposal expires.
+    pub expiration_ts: DateTime<Utc>,
+}
+
+/// The id of a newly created block trade proposal.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct CreatedBlockTradeProposal {
+    /// The id of the created proposal; pass it unchanged to the proposal endpoints.
+    pub block_trade_proposal_id: String,
+}
+
+/// Where the caller books its side when accepting a block trade proposal.
+#[cfg(feature = "trading")]
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AcceptBlockTradeProposal {
+    /// Subtrader id to book the caller's side onto; provide this or `subaccount`, not both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtrader_id: Option<String>,
+    /// Subaccount number to book the caller's side onto, 0 for the primary account; provide this
+    /// or `subtrader_id`, not both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subaccount: Option<u32>,
+}
+
+#[cfg(feature = "trading")]
+impl TradingClient {
+    /// `POST /communications/block-trade-proposals`: create a block trade proposal naming both
+    /// counterparties, the market, the price in centi-cents, the size in centicounts, the maker
+    /// side and an expiration.
+    ///
+    /// The request carries no caller-chosen id, so it is not marked idempotent: a timeout,
+    /// connection failure, or HTTP 5xx surfaces as [`crate::KalshiError::Ambiguous`] because a
+    /// proposal may have been created. Reconcile with
+    /// `Client::list_block_trade_proposals` before retrying. Charged to the Write bucket (the API
+    /// serves communications endpoints from exchange shard 1, which this crate models as the
+    /// single Write bucket).
+    pub async fn propose_block_trade(
+        &self,
+        proposal: &ProposeBlockTrade,
+    ) -> Result<WriteOutcome<CreatedBlockTradeProposal>> {
+        let request = Request::post("/communications/block-trade-proposals")
+            .body(proposal)
+            .authenticated();
+        self.write(request, proposal.market_ticker.clone(), None)
+            .await
+    }
+
+    /// `DELETE /communications/block-trade-proposals/{proposal_id}`: cancel a pending proposal.
+    /// Only the proposer can cancel it. Idempotent by method.
+    pub async fn cancel_block_trade_proposal(&self, proposal_id: &str) -> Result<WriteOutcome<()>> {
+        self.write_empty(
+            Request::delete(format!(
+                "/communications/block-trade-proposals/{proposal_id}"
+            ))
+            .authenticated(),
+            String::new(),
+            None,
+        )
+        .await
+    }
+
+    /// `POST /communications/block-trade-proposals/{proposal_id}/accept`: accept a proposal as
+    /// whichever side the caller is named on. Pass `booking` to book the caller's side onto one of
+    /// its own subaccounts; omit it to keep the one the proposal named. Accepting is a state
+    /// transition, so the request is marked idempotent: re-accepting an accepted side books it
+    /// again rather than creating a duplicate.
+    pub async fn accept_block_trade_proposal(
+        &self,
+        proposal_id: &str,
+        booking: Option<&AcceptBlockTradeProposal>,
+    ) -> Result<WriteOutcome<()>> {
+        let path = format!("/communications/block-trade-proposals/{proposal_id}/accept");
+        let mut request = Request::post(path).authenticated().idempotent(true);
+        if let Some(booking) = booking {
+            request = request.body(booking);
+        }
+        self.write_empty(request, String::new(), None).await
+    }
+
+    /// `POST /communications/block-trade-proposals/{proposal_id}/reject`: reject a pending
+    /// proposal. Either counterparty can reject it; the proposer cancels it instead. Rejecting is
+    /// a state transition, so the request is marked idempotent: re-rejecting an already rejected
+    /// proposal returns HTTP 409 rather than a duplicate.
+    pub async fn reject_block_trade_proposal(&self, proposal_id: &str) -> Result<WriteOutcome<()>> {
+        let request = Request::post(format!(
+            "/communications/block-trade-proposals/{proposal_id}/reject"
+        ))
+        .authenticated()
+        .idempotent(true);
+        self.write_empty(request, String::new(), None).await
     }
 }
