@@ -13,6 +13,8 @@ pub const DEFAULT_COST: u32 = 10;
 pub const CF_BENCHMARKS_COST: u32 = 50;
 /// Token cost of `GET /portfolio/orders/{order_id}`.
 pub const GET_ORDER_COST: u32 = 2;
+/// Token cost per order in a `DELETE /portfolio/events/orders/batched` request.
+pub const BATCH_CANCEL_COST: u32 = 2;
 
 /// Kalshi account tier; selects the Read, Write and balance bucket budgets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

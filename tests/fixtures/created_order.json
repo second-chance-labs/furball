@@ -1,0 +1,9 @@
+{
+  "order_id": "o-456",
+  "client_order_id": "c-456",
+  "fill_count": "5.00",
+  "remaining_count": "5.00",
+  "average_fill_price": "0.55",
+  "average_fee_paid": "0.01",
+  "ts_ms": 1767000000000
+}
