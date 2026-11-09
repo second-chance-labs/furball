@@ -50,6 +50,6 @@ pub use routing::{Cutoff, TradeId};
 
 #[cfg(feature = "trading")]
 pub use trading::{
-    CancelledOrder, DryRun, Environment, NewOrder, Order, OrderSide, SelfTradePrevention,
-    TimeInForce, TradingClient, TradingClientBuilder, WriteOutcome,
+    CancelledOrder, CreateOrderV2, DryRun, Environment, Order, OrderBuilder, OrderSide,
+    SelfTradePrevention, TimeInForce, TradingClient, TradingClientBuilder, WriteOutcome,
 };
