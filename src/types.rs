@@ -780,8 +780,9 @@ pub struct Settlement {
 /// Response of `GET /account/limits`: the account's usage tier, bucket limits, and grants.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct AccountLimits {
-    /// Effective usage tier.
-    pub usage_tier: Tier,
+    /// Effective usage tier; `None` when Kalshi reports a tier this crate does not know yet.
+    #[serde(default, deserialize_with = "tier_or_none")]
+    pub usage_tier: Option<Tier>,
     /// Read bucket limits.
     pub read: BucketLimit,
     /// Write bucket limits.
@@ -804,8 +805,9 @@ pub struct BucketLimit {
 pub struct ApiUsageLevelGrant {
     /// Exchange instance the grant applies to.
     pub exchange_instance: ExchangeInstance,
-    /// Granted usage level.
-    pub level: Tier,
+    /// Granted usage level; `None` when Kalshi reports a tier this crate does not know yet.
+    #[serde(default, deserialize_with = "tier_or_none")]
+    pub level: Option<Tier>,
     /// How the grant was earned.
     pub source: GrantSource,
     /// Expiry, Unix seconds; `None` for permanent grants.
@@ -895,4 +897,9 @@ pub struct EndpointCost {
     pub path: String,
     /// Token cost.
     pub cost: u32,
+}
+
+fn tier_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Tier>, D::Error> {
+    let name = String::deserialize(deserializer)?;
+    Ok(Tier::from_name(&name))
 }

@@ -259,6 +259,7 @@ impl TradingClient {
                 body: request.body.clone().unwrap_or(serde_json::Value::Null),
             }));
         }
+        let request = request.halted_when(|| HALTED.load(Ordering::SeqCst));
         let body = self.client.send_text(&request).await?;
         let decoded =
             serde_json::from_str(&body).map_err(|source| KalshiError::Decode { body, source })?;

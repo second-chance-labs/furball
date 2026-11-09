@@ -39,6 +39,7 @@ pub struct Request {
     pub(crate) bucket: BucketKind,
     pub(crate) authenticated: bool,
     pub(crate) idempotent: bool,
+    pub(crate) halted: Option<fn() -> bool>,
 }
 
 impl Request {
@@ -77,6 +78,7 @@ impl Request {
             bucket,
             authenticated: false,
             idempotent,
+            halted: None,
         }
     }
 
@@ -111,6 +113,7 @@ impl Request {
     /// five per second above) instead of the Read bucket.
     pub fn balance(mut self) -> Self {
         self.bucket = BucketKind::Balance;
+        self.cost = 1;
         self
     }
 
@@ -124,6 +127,12 @@ impl Request {
     /// HTTP 5xx. GET, PUT and DELETE default to `true`; POST defaults to `false`.
     pub fn idempotent(mut self, idempotent: bool) -> Self {
         self.idempotent = idempotent;
+        self
+    }
+
+    #[cfg(feature = "trading")]
+    pub(crate) fn halted_when(mut self, halted: fn() -> bool) -> Self {
+        self.halted = Some(halted);
         self
     }
 }
@@ -252,6 +261,9 @@ impl Client {
                 BucketKind::Balance => &inner.balance,
             };
             bucket.acquire(request.cost).await?;
+            if request.halted.is_some_and(|halted| halted()) {
+                return Err(KalshiError::TradingHalted);
+            }
             let response = match self.build(request)?.send().await {
                 Ok(response) => response,
                 Err(error) => return Err(transport_failure(request, error)),

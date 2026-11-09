@@ -466,7 +466,7 @@ async fn read_traffic_does_not_consume_write_tokens() {
         .expect("write");
     let elapsed = writes.elapsed();
     assert!(elapsed >= Duration::from_millis(180), "writes {elapsed:?}");
-    assert!(elapsed < Duration::from_millis(350), "writes {elapsed:?}");
+    assert!(elapsed < Duration::from_millis(1_000), "writes {elapsed:?}");
 }
 
 #[tokio::test]

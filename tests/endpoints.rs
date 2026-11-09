@@ -348,7 +348,7 @@ async fn account_limits_decode_tier_buckets_and_grants() {
         .account_limits()
         .await
         .expect("limits");
-    assert_eq!(limits.usage_tier, furball::Tier::Expert);
+    assert_eq!(limits.usage_tier, Some(furball::Tier::Expert));
     assert_eq!(
         limits.read,
         furball::types::BucketLimit {
@@ -368,14 +368,14 @@ async fn account_limits_decode_tier_buckets_and_grants() {
         limits.grants[0].exchange_instance,
         furball::types::ExchangeInstance::EventContract
     );
-    assert_eq!(limits.grants[0].level, furball::Tier::Prestige);
+    assert_eq!(limits.grants[0].level, Some(furball::Tier::Prestige));
     assert_eq!(limits.grants[0].source, furball::types::GrantSource::Manual);
     assert_eq!(limits.grants[0].expires_ts, None);
     assert_eq!(
         limits.grants[1].exchange_instance,
         furball::types::ExchangeInstance::Margined
     );
-    assert_eq!(limits.grants[1].level, furball::Tier::Prime);
+    assert_eq!(limits.grants[1].level, Some(furball::Tier::Prime));
     assert_eq!(limits.grants[1].source, furball::types::GrantSource::Volume);
     assert_eq!(limits.grants[1].expires_ts, Some(1_893_456_000));
 
@@ -422,4 +422,16 @@ fn unknown_tier_names_are_rejected_with_their_name() {
         furball::Tier::from_name("prestige"),
         Some(furball::Tier::Prestige)
     );
+}
+
+#[test]
+fn unknown_tier_in_account_limits_does_not_discard_the_response() {
+    let mut body = fixture("account_limits");
+    body["usage_tier"] = json!("transcendent");
+    body["grants"][0]["level"] = json!("transcendent");
+    let limits: furball::types::AccountLimits = serde_json::from_value(body).expect("limits");
+    assert_eq!(limits.usage_tier, None);
+    assert_eq!(limits.grants[0].level, None);
+    assert_eq!(limits.grants[1].level, Some(furball::Tier::Prime));
+    assert_eq!(limits.write.refill_rate, 600);
 }

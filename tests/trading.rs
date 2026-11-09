@@ -111,12 +111,33 @@ fn build_requires_credentials() {
     assert!(matches!(error, KalshiError::Auth(_)));
 }
 
+static WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn created_order_response() -> ResponseTemplate {
+    ResponseTemplate::new(201).set_body_json(json!({
+        "order_id": "o1",
+        "fill_count": "0",
+        "remaining_count": "10",
+        "ts_ms": 1
+    }))
+}
+
 #[tokio::test]
 async fn halted_clients_make_zero_http_requests() {
+    let _serial = WRITES.lock().await;
     let server_a = MockServer::start().await;
     let server_b = MockServer::start().await;
     let client_a = trading_client(&server_a);
     let client_b = trading_client(&server_b);
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/events/orders")))
+        .respond_with(created_order_response())
+        .mount(&server_a)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server_b)
+        .await;
 
     TradingClient::halt();
     let error = client_a
@@ -126,19 +147,10 @@ async fn halted_clients_make_zero_http_requests() {
     assert!(matches!(error, KalshiError::TradingHalted));
     let error = client_b.cancel_order("o1").await.expect_err("halted");
     assert!(matches!(error, KalshiError::TradingHalted));
+    assert!(server_a.received_requests().await.expect("log").is_empty());
+    assert!(server_b.received_requests().await.expect("log").is_empty());
 
     TradingClient::resume();
-    Mock::given(method("POST"))
-        .and(path(format!("{API_PREFIX}/portfolio/events/orders")))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "order_id": "o1",
-            "fill_count": "0",
-            "remaining_count": "10",
-            "ts_ms": 1
-        })))
-        .expect(1)
-        .mount(&server_a)
-        .await;
     let outcome = client_a.create_order(&order(None)).await.expect("resumed");
     assert!(matches!(outcome, WriteOutcome::Sent(_)));
     assert_eq!(server_a.received_requests().await.expect("log").len(), 1);
@@ -146,7 +158,26 @@ async fn halted_clients_make_zero_http_requests() {
 }
 
 #[tokio::test]
+async fn halt_during_rate_limit_backoff_stops_the_retry() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "2"))
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    let pending = tokio::spawn(async move { client.create_order(&order(Some("c1"))).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    TradingClient::halt();
+    let result = pending.await.expect("task");
+    TradingClient::resume();
+    assert!(matches!(result, Err(KalshiError::TradingHalted)));
+    assert_eq!(server.received_requests().await.expect("log").len(), 1);
+}
+
+#[tokio::test]
 async fn dry_run_clients_make_zero_http_requests() {
+    let _serial = WRITES.lock().await;
     let server = MockServer::start().await;
     let client = TradingClient::builder()
         .base_url(format!("{}{API_PREFIX}", server.uri()))
@@ -191,6 +222,7 @@ async fn dry_run_clients_make_zero_http_requests() {
 
 #[tokio::test]
 async fn create_order_sends_a_signed_request_and_decodes_the_response() {
+    let _serial = WRITES.lock().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(format!("{API_PREFIX}/portfolio/events/orders")))
@@ -257,6 +289,7 @@ async fn create_order_sends_a_signed_request_and_decodes_the_response() {
 
 #[tokio::test]
 async fn create_order_without_client_order_id_surfaces_ambiguity_on_5xx() {
+    let _serial = WRITES.lock().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(format!("{API_PREFIX}/portfolio/events/orders")))
@@ -276,6 +309,7 @@ async fn create_order_without_client_order_id_surfaces_ambiguity_on_5xx() {
 
 #[tokio::test]
 async fn create_order_with_client_order_id_surfaces_plain_errors_on_5xx() {
+    let _serial = WRITES.lock().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(format!("{API_PREFIX}/portfolio/events/orders")))
@@ -298,6 +332,7 @@ async fn create_order_with_client_order_id_surfaces_plain_errors_on_5xx() {
 
 #[tokio::test]
 async fn cancel_order_sends_a_signed_delete() {
+    let _serial = WRITES.lock().await;
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
         .and(path(format!("{API_PREFIX}/portfolio/events/orders/o1")))
@@ -341,6 +376,7 @@ async fn cancel_order_sends_a_signed_delete() {
 
 #[tokio::test]
 async fn write_attempts_are_logged_without_credentials() {
+    let _serial = WRITES.lock().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(format!("{API_PREFIX}/portfolio/events/orders")))
