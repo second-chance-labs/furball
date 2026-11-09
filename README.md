@@ -47,6 +47,10 @@ let client = furball::TradingClient::builder()
 - `dry_run(true)` validates and signs each write but returns `WriteOutcome::DryRun` instead of sending.
 - Every write attempt is logged at `info` (method, path, ticker, client order ID), never keys or signatures.
 
+## Testing (opt-in)
+
+`furball::testing::FakeExchange` (behind the `testing` cargo feature, which enables `trading`) is an in-process fake exchange for testing strategies without Kalshi: price-and-time priority matching for limit orders (good-till-canceled, immediate-or-cancel, fill-or-kill), fills at the resting price, fees from `FeeCalculator` with a per-order accumulator, and tracked balance, positions, realized P&L and settlements. The test controls the clock, injects counterparty liquidity and market data, and settles markets. Its module docs carry a worked strategy example.
+
 ## Fees
 
 Fee type names and rounding come from Kalshi's docs. The fee schedule builder reads fee types and multipliers from the API.

@@ -11,6 +11,11 @@
 //!   and historical endpoints using the cached [`Cutoff`].
 //! - The trading write surface (`TradingClient`) is behind the `trading` cargo feature, off by
 //!   default: a default build contains no write methods.
+//! - The `testing` feature (which enables `trading`) adds an in-process fake exchange
+//!   (`testing::FakeExchange`): price-and-time priority matching for limit orders
+//!   (good-till-canceled, immediate-or-cancel, fill-or-kill), fees from [`FeeCalculator`],
+//!   balance, position and settlement tracking, and a test-controlled clock, market data
+//!   and settlement.
 //! - Authenticated portfolio reads: [`Client::balance`] (its own per-second bucket),
 //!   [`Client::positions`], [`Client::settlements`] and [`Client::subaccount_balances`].
 //! - Authenticated order and fill reads, live and archived: [`Client::get_order`],
@@ -49,6 +54,8 @@ mod portfolio;
 mod pricing;
 mod rate_limit;
 mod routing;
+#[cfg(feature = "testing")]
+pub mod testing;
 #[cfg(feature = "trading")]
 mod trading;
 pub mod types;
