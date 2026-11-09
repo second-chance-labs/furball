@@ -579,6 +579,347 @@ async fn decrease_order_serializes_exactly_one_of_reduce_by_or_reduce_to() {
     }
 }
 
+fn batch_item(id: &str) -> CreateOrderV2 {
+    OrderBuilder::new(
+        "KXUPDOWN-25DEC",
+        OrderSide::Bid,
+        1.into(),
+        "0.55".parse().expect("price"),
+        TimeInForce::GoodTillCanceled,
+        SelfTradePrevention::TakerAtCross,
+    )
+    .client_order_id(id)
+    .build()
+}
+
+#[tokio::test]
+async fn batch_create_orders_returns_one_result_per_item_on_full_success() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/portfolio/events/orders/batched"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(|request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let orders = body["orders"].as_array().expect("orders array");
+            let body_ok = orders.len() == 2
+                && orders[0]["ticker"] == "KXUPDOWN-25DEC"
+                && orders[0]["client_order_id"] == "co-b1"
+                && orders[0]["count"] == "1"
+                && orders[0]["price"] == "0.55"
+                && orders[1]["client_order_id"] == "co-b2";
+            ResponseTemplate::new(if body_ok { 201 } else { 400 }).set_body_json(json!({
+                "orders": [
+                    {
+                        "order_id": "o1",
+                        "client_order_id": "co-b1",
+                        "fill_count": "0",
+                        "remaining_count": "1",
+                        "ts_ms": 1_700_000_000_000i64
+                    },
+                    {
+                        "order_id": "o2",
+                        "client_order_id": "co-b2",
+                        "fill_count": "1",
+                        "remaining_count": "0",
+                        "average_fill_price": "0.55",
+                        "average_fee_paid": "0.001",
+                        "ts_ms": 1_700_000_000_100i64
+                    }
+                ]
+            }))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    let orders = [batch_item("co-b1"), batch_item("co-b2")];
+    match client
+        .batch_create_orders(&orders)
+        .await
+        .expect("batch created")
+    {
+        WriteOutcome::Sent(results) => {
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0].order_id.as_deref(), Some("o1"));
+            assert_eq!(results[0].client_order_id.as_deref(), Some("co-b1"));
+            assert_eq!(results[0].fill_count, Some(Decimal::ZERO));
+            assert_eq!(results[0].remaining_count, Some(Decimal::ONE));
+            assert_eq!(results[0].ts_ms, Some(1_700_000_000_000));
+            assert_eq!(results[0].error, None);
+            assert_eq!(results[1].order_id.as_deref(), Some("o2"));
+            assert_eq!(
+                results[1].average_fill_price,
+                Some("0.55".parse().expect("decimal"))
+            );
+            assert_eq!(results[1].error, None);
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn batch_create_reports_failed_items_alongside_successful_ones() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/portfolio/events/orders/batched"
+        )))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "orders": [
+                {
+                    "order_id": "o1",
+                    "client_order_id": "co-b1",
+                    "fill_count": "0",
+                    "remaining_count": "1",
+                    "ts_ms": 1_700_000_000_000i64
+                },
+                {
+                    "client_order_id": "co-b2",
+                    "error": { "code": 4001, "message": "insufficient funds" }
+                }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    let orders = [batch_item("co-b1"), batch_item("co-b2")];
+    match client
+        .batch_create_orders(&orders)
+        .await
+        .expect("batch created")
+    {
+        WriteOutcome::Sent(results) => {
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0].order_id.as_deref(), Some("o1"));
+            assert_eq!(results[0].error, None);
+            assert_eq!(results[1].order_id, None);
+            assert_eq!(results[1].ts_ms, None);
+            let error = results[1].error.as_ref().expect("second item failed");
+            assert_eq!(error.code, 4001);
+            assert_eq!(error.message, "insufficient funds");
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn batch_create_over_the_write_bucket_capacity_is_rejected_before_sending() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let client = trading_client(&server);
+    // Basic tier: 10 tokens per item, write bucket capacity 100. Eleven items cost 110.
+    let orders: Vec<CreateOrderV2> = (0..11)
+        .map(|index| batch_item(&format!("co-{index}")))
+        .collect();
+    let error = client
+        .batch_create_orders(&orders)
+        .await
+        .expect_err("batch too large");
+    assert!(
+        matches!(
+            error,
+            KalshiError::CostExceedsBucket {
+                cost: 110,
+                capacity: 100
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(server.received_requests().await.expect("log").is_empty());
+}
+
+#[tokio::test]
+async fn batch_dry_run_charges_the_sum_of_its_items() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let client = TradingClient::builder()
+        .base_url(format!("{}{API_PREFIX}", server.uri()))
+        .backoff_base(Duration::from_millis(1))
+        .credentials(credentials())
+        .dry_run(true)
+        .build()
+        .expect("client");
+
+    let orders = [
+        batch_item("co-b1"),
+        batch_item("co-b2"),
+        batch_item("co-b3"),
+    ];
+    match client.batch_create_orders(&orders).await.expect("dry run") {
+        WriteOutcome::DryRun(dry) => {
+            assert_eq!(dry.path, "/portfolio/events/orders/batched");
+            assert_eq!(dry.cost, 30);
+            assert_eq!(dry.body["orders"].as_array().expect("orders").len(), 3);
+        }
+        WriteOutcome::Sent(_) => panic!("dry run must not send"),
+    }
+
+    let cancels = [
+        furball::BatchCancelOrder {
+            order_id: "o1".into(),
+            subaccount: None,
+            exchange_index: None,
+            market_ticker: None,
+        },
+        furball::BatchCancelOrder {
+            order_id: "o2".into(),
+            subaccount: Some(0),
+            exchange_index: None,
+            market_ticker: Some("KXUPDOWN-25DEC".into()),
+        },
+    ];
+    match client.batch_cancel_orders(&cancels).await.expect("dry run") {
+        WriteOutcome::DryRun(dry) => {
+            assert_eq!(dry.method, "DELETE");
+            assert_eq!(dry.path, "/portfolio/events/orders/batched");
+            assert_eq!(dry.cost, 4);
+            let orders = dry.body["orders"].as_array().expect("orders");
+            assert_eq!(orders[0]["order_id"], "o1");
+            assert!(orders[0].get("subaccount").is_none());
+            assert!(orders[0].get("market_ticker").is_none());
+            assert_eq!(orders[1]["subaccount"], 0);
+            assert_eq!(orders[1]["market_ticker"], "KXUPDOWN-25DEC");
+        }
+        WriteOutcome::Sent(_) => panic!("dry run must not send"),
+    }
+    assert!(server.received_requests().await.expect("log").is_empty());
+}
+
+#[tokio::test]
+async fn batch_cancel_reports_failed_items_alongside_successful_ones() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!(
+            "{API_PREFIX}/portfolio/events/orders/batched"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(|request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let orders = body["orders"].as_array().expect("orders array");
+            let body_ok = orders.len() == 2
+                && orders[0]["order_id"] == "o1"
+                && orders[1]["order_id"] == "o2"
+                && orders[1]["market_ticker"] == "KXUPDOWN-25DEC";
+            ResponseTemplate::new(if body_ok { 200 } else { 400 }).set_body_json(json!({
+                "orders": [
+                    {
+                        "order_id": "o1",
+                        "client_order_id": "co-b1",
+                        "reduced_by": "1",
+                        "ts_ms": 1_700_000_000_000i64
+                    },
+                    {
+                        "order_id": "o2",
+                        "reduced_by": "0",
+                        "error": { "code": "4004", "message": "order not found" }
+                    }
+                ]
+            }))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    let cancels = [
+        furball::BatchCancelOrder {
+            order_id: "o1".into(),
+            subaccount: None,
+            exchange_index: None,
+            market_ticker: None,
+        },
+        furball::BatchCancelOrder {
+            order_id: "o2".into(),
+            subaccount: None,
+            exchange_index: None,
+            market_ticker: Some("KXUPDOWN-25DEC".into()),
+        },
+    ];
+    match client
+        .batch_cancel_orders(&cancels)
+        .await
+        .expect("batch cancelled")
+    {
+        WriteOutcome::Sent(results) => {
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0].order_id, "o1");
+            assert_eq!(results[0].reduced_by, Decimal::ONE);
+            assert_eq!(results[0].ts_ms, Some(1_700_000_000_000));
+            assert_eq!(results[0].error, None);
+            assert_eq!(results[1].order_id, "o2");
+            assert_eq!(results[1].reduced_by, Decimal::ZERO);
+            assert_eq!(results[1].ts_ms, None);
+            let error = results[1].error.as_ref().expect("second item failed");
+            assert_eq!(error.code, 4004);
+            assert_eq!(error.message, "order not found");
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn batch_cancel_over_the_write_bucket_capacity_is_rejected_before_sending() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let client = trading_client(&server);
+    // Basic tier: 2 tokens per item, write bucket capacity 100. Fifty-one items cost 102.
+    let cancels: Vec<furball::BatchCancelOrder> = (0..51)
+        .map(|index| furball::BatchCancelOrder {
+            order_id: format!("o{index}"),
+            subaccount: None,
+            exchange_index: None,
+            market_ticker: None,
+        })
+        .collect();
+    let error = client
+        .batch_cancel_orders(&cancels)
+        .await
+        .expect_err("batch too large");
+    assert!(
+        matches!(
+            error,
+            KalshiError::CostExceedsBucket {
+                cost: 102,
+                capacity: 100
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(server.received_requests().await.expect("log").is_empty());
+}
+
+#[tokio::test]
+async fn batch_create_with_a_missing_client_order_id_surfaces_ambiguity_on_5xx() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/portfolio/events/orders/batched"
+        )))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_json(json!({ "code": 5000, "message": "boom" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = trading_client(&server);
+    let mut order = batch_item("co-b1");
+    order.client_order_id = None;
+    let error = client
+        .batch_create_orders(std::slice::from_ref(&order))
+        .await
+        .expect_err("ambiguous");
+    assert!(matches!(error, KalshiError::Ambiguous(_)), "{error:?}");
+}
+
 #[test]
 fn fixture_decodes_the_full_create_order_response() {
     let file = format!(
