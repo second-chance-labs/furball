@@ -35,6 +35,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use rand::Rng;
 use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
@@ -391,6 +392,92 @@ impl TradingClient {
         let request = Request::put(format!("/portfolio/order_groups/{order_group_id}/limit"))
             .body(UpdateOrderGroupLimitBody {
                 contracts_limit_fp: *contracts_limit,
+            })
+            .authenticated();
+        self.write_empty(request, String::new(), None).await
+    }
+
+    /// `POST /portfolio/events/orders/with_exit_trigger`: create an order with an attached
+    /// stop-loss/take-profit trigger in one call. The response is the created order. Idempotent
+    /// (safe to retry) only when the order has a `client_order_id`; otherwise a failure after
+    /// dispatch surfaces as [`KalshiError::Ambiguous`].
+    pub async fn create_order_with_exit_trigger(
+        &self,
+        order: &CreateOrderV2,
+        exit_trigger: &ExitTrigger,
+    ) -> Result<WriteOutcome<Order>> {
+        let mut request = Request::post("/portfolio/events/orders/with_exit_trigger")
+            .body(CreateOrderWithExitTriggerBody {
+                order,
+                exit_trigger,
+            })
+            .authenticated();
+        if order.client_order_id.is_some() {
+            request = request.idempotent(true);
+        }
+        self.write(request, order.ticker.clone(), order.client_order_id.clone())
+            .await
+    }
+
+    /// `PUT /portfolio/positions/{ticker}/exit_trigger`: set the position exit trigger for one
+    /// market. Idempotent.
+    pub async fn set_position_exit_trigger(
+        &self,
+        ticker: &str,
+        trigger: &ExitTrigger,
+    ) -> Result<WriteOutcome<EventContractExitTrigger>> {
+        let request = Request::put(format!("/portfolio/positions/{ticker}/exit_trigger"))
+            .body(trigger)
+            .authenticated();
+        self.write(request, ticker.to_owned(), None).await
+    }
+
+    /// `DELETE /portfolio/positions/{ticker}/exit_trigger`: remove the position exit trigger for
+    /// one market. Idempotent.
+    pub async fn delete_position_exit_trigger(&self, ticker: &str) -> Result<WriteOutcome<()>> {
+        self.write_empty(
+            Request::delete(format!("/portfolio/positions/{ticker}/exit_trigger")).authenticated(),
+            ticker.to_owned(),
+            None,
+        )
+        .await
+    }
+
+    /// `POST /portfolio/subaccounts`: create a new subaccount.
+    pub async fn create_subaccount(
+        &self,
+        exchange_index: Option<u32>,
+    ) -> Result<WriteOutcome<CreatedSubaccount>> {
+        let request = Request::post("/portfolio/subaccounts")
+            .body(CreateSubaccountBody { exchange_index })
+            .authenticated();
+        self.write(request, String::new(), None).await
+    }
+
+    /// `POST /portfolio/subaccounts/transfer`: move funds between the account's subaccounts.
+    /// Idempotent via `SubaccountTransfer::client_transfer_id`.
+    pub async fn transfer_between_subaccounts(
+        &self,
+        transfer: &SubaccountTransfer,
+    ) -> Result<WriteOutcome<()>> {
+        let request = Request::post("/portfolio/subaccounts/transfer")
+            .body(transfer)
+            .authenticated()
+            .idempotent(true);
+        self.write_empty(request, String::new(), None).await
+    }
+
+    /// `PUT /portfolio/subaccounts/netting`: enable or disable netting for one subaccount.
+    /// Idempotent.
+    pub async fn update_subaccount_netting(
+        &self,
+        subaccount_number: u32,
+        enabled: bool,
+    ) -> Result<WriteOutcome<()>> {
+        let request = Request::put("/portfolio/subaccounts/netting")
+            .body(UpdateSubaccountNettingBody {
+                subaccount_number,
+                enabled,
             })
             .authenticated();
         self.write_empty(request, String::new(), None).await
@@ -1036,4 +1123,213 @@ pub struct OrderGroup {
     /// Exchange shard, when present.
     #[serde(default)]
     pub exchange_index: Option<u32>,
+}
+
+fn optional_decimal_as_string<S: serde::Serializer>(
+    value: &Option<Decimal>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    match value {
+        Some(value) => decimal_as_string(value, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
+/// Unit of an exit trigger's slippage allowance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SlippageUnit {
+    /// Basis points of the trigger price.
+    #[serde(rename = "bps")]
+    Bps,
+    /// Cents of a dollar.
+    #[serde(rename = "cents")]
+    Cents,
+}
+
+/// Slippage allowance for an exit trigger: how far past the trigger price the resulting exit
+/// order may trade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitSlippage {
+    /// Unit of [`Self::value`].
+    pub unit: SlippageUnit,
+    /// Slippage amount in [`Self::unit`] units.
+    pub value: i64,
+}
+
+/// Kind of an exit trigger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum ExitTriggerKind {
+    /// A paired stop-loss and take-profit.
+    Bracket,
+    /// A kind this crate does not know yet, kept verbatim.
+    Other(String),
+}
+
+impl From<String> for ExitTriggerKind {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "bracket" => Self::Bracket,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+impl From<ExitTriggerKind> for String {
+    fn from(value: ExitTriggerKind) -> Self {
+        match value {
+            ExitTriggerKind::Bracket => "bracket".to_owned(),
+            ExitTriggerKind::Other(other) => other,
+        }
+    }
+}
+
+/// Stop-loss and/or take-profit prices for an exit trigger. Prices are YES prices in dollars.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ExitTrigger {
+    /// Slippage allowance for the exit orders; omitted uses the exchange default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slippage: Option<ExitSlippage>,
+    /// Trigger kind; currently only [`ExitTriggerKind::Bracket`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ExitTriggerKind>,
+    /// Stop-loss price; the exit fires when the price crosses it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "optional_decimal_as_string",
+        deserialize_with = "optional_decimal_from_string"
+    )]
+    pub stop_loss_price: Option<Decimal>,
+    /// Take-profit price; the exit fires when the price crosses it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "optional_decimal_as_string",
+        deserialize_with = "optional_decimal_from_string"
+    )]
+    pub take_profit_price: Option<Decimal>,
+}
+
+#[derive(Serialize)]
+struct CreateOrderWithExitTriggerBody<'a> {
+    #[serde(flatten)]
+    order: &'a CreateOrderV2,
+    exit_trigger: &'a ExitTrigger,
+}
+
+/// Status of an event contract exit trigger.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "String")]
+pub enum ExitTriggerStatus {
+    /// Waiting for the entry order to fill before arming.
+    PendingOnEntry,
+    /// Armed and waiting to trigger.
+    Active,
+    /// Triggered; the exit order filled.
+    Filled,
+    /// Canceled before triggering.
+    Canceled,
+    /// The trigger failed.
+    Failed,
+    /// A status this crate does not know yet, kept verbatim.
+    Other(String),
+}
+
+impl From<String> for ExitTriggerStatus {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "pending_on_entry" => Self::PendingOnEntry,
+            "active" => Self::Active,
+            "filled" => Self::Filled,
+            "canceled" => Self::Canceled,
+            "failed" => Self::Failed,
+            _ => Self::Other(value),
+        }
+    }
+}
+
+/// Which leg of a bracket trigger fired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggeredLeg {
+    /// The stop-loss leg.
+    StopLoss,
+    /// The take-profit leg.
+    TakeProfit,
+}
+
+/// An event contract exit trigger, as returned by
+/// `PUT /portfolio/positions/{ticker}/exit_trigger`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct EventContractExitTrigger {
+    /// Slippage allowance, when set.
+    #[serde(default)]
+    pub slippage: Option<ExitSlippage>,
+    /// Trigger identifier.
+    pub id: String,
+    /// Market ticker of the guarded position.
+    pub ticker: String,
+    /// Outcome side of the guarded position.
+    pub side: crate::types::OutcomeSide,
+    /// Subaccount number of the guarded position, 0 for the primary account.
+    pub subaccount_number: u32,
+    /// Trigger kind.
+    pub kind: ExitTriggerKind,
+    /// Stop-loss price, when set.
+    #[serde(default, deserialize_with = "optional_decimal_from_string")]
+    pub stop_loss_price: Option<Decimal>,
+    /// Take-profit price, when set.
+    #[serde(default, deserialize_with = "optional_decimal_from_string")]
+    pub take_profit_price: Option<Decimal>,
+    /// Trigger status.
+    pub status: ExitTriggerStatus,
+    /// Why the trigger is in its current state, when present.
+    #[serde(default)]
+    pub status_reason: Option<String>,
+    /// The order that fired the trigger, when it triggered.
+    #[serde(default)]
+    pub triggered_order_id: Option<String>,
+    /// The leg that fired, when it triggered.
+    #[serde(default)]
+    pub triggered_leg: Option<TriggeredLeg>,
+    /// When the trigger was created.
+    pub created_time: DateTime<Utc>,
+    /// When the trigger was last updated.
+    pub updated_time: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct CreateSubaccountBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exchange_index: Option<u32>,
+}
+
+/// The newly created subaccount, as returned by `POST /portfolio/subaccounts`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct CreatedSubaccount {
+    /// Sequential number assigned to the subaccount (1-63).
+    pub subaccount_number: u32,
+}
+
+/// Fields for `POST /portfolio/subaccounts/transfer`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SubaccountTransfer {
+    /// Client-provided UUID; makes the transfer idempotent.
+    pub client_transfer_id: String,
+    /// Source subaccount number, 0 for the primary account.
+    pub from_subaccount: u32,
+    /// Destination subaccount number, 0 for the primary account.
+    pub to_subaccount: u32,
+    /// Amount to transfer in cents.
+    pub amount_cents: i64,
+    /// Exchange shard; defaults to 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exchange_index: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct UpdateSubaccountNettingBody {
+    subaccount_number: u32,
+    enabled: bool,
 }

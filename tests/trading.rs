@@ -1281,3 +1281,271 @@ async fn order_builder_attaches_orders_to_a_group() {
     assert_eq!(body["order_group_id"], "g-123");
     assert_eq!(server.received_requests().await.expect("log").len(), 1);
 }
+
+#[tokio::test]
+async fn set_position_exit_trigger_sends_the_trigger_and_decodes_the_fixture() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let fixture = fixture_value("exit_trigger");
+    let response_fixture = fixture.clone();
+    Mock::given(method("PUT"))
+        .and(path(format!(
+            "{API_PREFIX}/portfolio/positions/KXUPDOWN-25DEC/exit_trigger"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let body_ok = body["kind"] == "bracket"
+                && body["stop_loss_price"] == "0.45"
+                && body["take_profit_price"] == "0.85"
+                && body["slippage"]["unit"] == "bps"
+                && body["slippage"]["value"] == 50;
+            if body_ok {
+                ResponseTemplate::new(200).set_body_json(response_fixture.clone())
+            } else {
+                ResponseTemplate::new(400)
+            }
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    let trigger = furball::ExitTrigger {
+        slippage: Some(furball::ExitSlippage {
+            unit: furball::SlippageUnit::Bps,
+            value: 50,
+        }),
+        kind: Some(furball::ExitTriggerKind::Bracket),
+        stop_loss_price: Some("0.45".parse().expect("decimal")),
+        take_profit_price: Some("0.85".parse().expect("decimal")),
+    };
+    match client
+        .set_position_exit_trigger("KXUPDOWN-25DEC", &trigger)
+        .await
+        .expect("set")
+    {
+        WriteOutcome::Sent(set) => {
+            let expected: furball::EventContractExitTrigger =
+                serde_json::from_value(fixture).expect("decode fixture");
+            assert_eq!(set, expected);
+            assert_eq!(set.id, "et-123");
+            assert_eq!(set.ticker, "KXUPDOWN-25DEC");
+            assert_eq!(set.kind, furball::ExitTriggerKind::Bracket);
+            assert_eq!(set.status, furball::ExitTriggerStatus::Active);
+            assert_eq!(set.stop_loss_price, Some("0.45".parse().expect("decimal")));
+            assert_eq!(set.slippage.unwrap().value, 50);
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn delete_position_exit_trigger_sends_a_signed_delete() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let fixture = fixture_value("empty");
+    Mock::given(method("DELETE"))
+        .and(path(format!(
+            "{API_PREFIX}/portfolio/positions/KXUPDOWN-25DEC/exit_trigger"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let valid = verify(
+                &header(furball::ACCESS_TIMESTAMP_HEADER),
+                "DELETE",
+                &format!("{API_PREFIX}/portfolio/positions/KXUPDOWN-25DEC/exit_trigger"),
+                &header(furball::ACCESS_SIGNATURE_HEADER),
+            );
+            ResponseTemplate::new(if valid { 200 } else { 401 }).set_body_json(fixture.clone())
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    match client
+        .delete_position_exit_trigger("KXUPDOWN-25DEC")
+        .await
+        .expect("deleted")
+    {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn create_order_with_exit_trigger_sends_order_and_trigger_and_decodes_the_order() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let fixture = fixture_value("created_order");
+    let response_fixture = fixture.clone();
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "{API_PREFIX}/portfolio/events/orders/with_exit_trigger"
+        )))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let body_ok = body["ticker"] == "KXUPDOWN-25DEC"
+                && body["side"] == "bid"
+                && body["count"] == "1"
+                && body["price"] == "0.55"
+                && body["client_order_id"] == "co-et"
+                && body["exit_trigger"]["stop_loss_price"] == "0.45"
+                && body["exit_trigger"]["take_profit_price"] == "0.85"
+                && body["exit_trigger"]["slippage"]["unit"] == "cents"
+                && body["exit_trigger"]["slippage"]["value"] == 3;
+            if body_ok {
+                ResponseTemplate::new(201).set_body_json(response_fixture.clone())
+            } else {
+                ResponseTemplate::new(400)
+            }
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    let order = batch_item("co-et");
+    let trigger = furball::ExitTrigger {
+        slippage: Some(furball::ExitSlippage {
+            unit: furball::SlippageUnit::Cents,
+            value: 3,
+        }),
+        kind: None,
+        stop_loss_price: Some("0.45".parse().expect("decimal")),
+        take_profit_price: Some("0.85".parse().expect("decimal")),
+    };
+    match client
+        .create_order_with_exit_trigger(&order, &trigger)
+        .await
+        .expect("created")
+    {
+        WriteOutcome::Sent(created) => {
+            let expected: furball::Order = serde_json::from_value(fixture).expect("decode");
+            assert_eq!(created, expected);
+            assert_eq!(created.order_id, "o-456");
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn create_subaccount_sends_the_request_and_decodes_the_fixture() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let fixture = fixture_value("created_subaccount");
+    let response_fixture = fixture.clone();
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/subaccounts")))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let body_ok =
+                body["exchange_index"] == 1 && body.as_object().is_some_and(|m| m.len() == 1);
+            if body_ok {
+                ResponseTemplate::new(201).set_body_json(response_fixture.clone())
+            } else {
+                ResponseTemplate::new(400)
+            }
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    match client.create_subaccount(Some(1)).await.expect("created") {
+        WriteOutcome::Sent(created) => {
+            let expected: furball::CreatedSubaccount =
+                serde_json::from_value(fixture).expect("decode fixture");
+            assert_eq!(created, expected);
+            assert_eq!(created.subaccount_number, 7);
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn transfer_between_subaccounts_sends_the_required_fields() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let fixture = fixture_value("empty");
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/subaccounts/transfer")))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let body_ok = body["client_transfer_id"] == "t-uuid-1"
+                && body["from_subaccount"] == 0
+                && body["to_subaccount"] == 2
+                && body["amount_cents"] == 150_000
+                && body.get("exchange_index").is_none();
+            if body_ok {
+                ResponseTemplate::new(200).set_body_json(fixture.clone())
+            } else {
+                ResponseTemplate::new(400)
+            }
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    let transfer = furball::SubaccountTransfer {
+        client_transfer_id: "t-uuid-1".into(),
+        from_subaccount: 0,
+        to_subaccount: 2,
+        amount_cents: 150_000,
+        exchange_index: None,
+    };
+    match client
+        .transfer_between_subaccounts(&transfer)
+        .await
+        .expect("transferred")
+    {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn update_subaccount_netting_sends_the_subaccount_and_flag() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let fixture = fixture_value("empty");
+    Mock::given(method("PUT"))
+        .and(path(format!("{API_PREFIX}/portfolio/subaccounts/netting")))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(move |request: &MockRequest| {
+            let body: Value = serde_json::from_slice(&request.body).expect("json body");
+            let body_ok = body["subaccount_number"] == 2 && body["enabled"] == true;
+            if body_ok {
+                ResponseTemplate::new(200).set_body_json(fixture.clone())
+            } else {
+                ResponseTemplate::new(400)
+            }
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    match client
+        .update_subaccount_netting(2, true)
+        .await
+        .expect("updated")
+    {
+        WriteOutcome::Sent(()) => {}
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}

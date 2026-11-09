@@ -51,7 +51,9 @@ pub use routing::{Cutoff, TradeId};
 #[cfg(feature = "trading")]
 pub use trading::{
     AmendOrder, AmendedOrder, BatchCancelOrder, BatchCancelResult, BatchCreateResult,
-    BatchItemError, CancelledOrder, CreateOrderV2, DecreaseAmount, DecreasedOrder, DryRun,
-    Environment, NewOrderGroup, Order, OrderBuilder, OrderGroup, OrderSide, SelfTradePrevention,
-    TimeInForce, TradingClient, TradingClientBuilder, WriteOutcome,
+    BatchItemError, CancelledOrder, CreateOrderV2, CreatedSubaccount, DecreaseAmount,
+    DecreasedOrder, DryRun, Environment, EventContractExitTrigger, ExitSlippage, ExitTrigger,
+    ExitTriggerKind, ExitTriggerStatus, NewOrderGroup, Order, OrderBuilder, OrderGroup, OrderSide,
+    SelfTradePrevention, SlippageUnit, SubaccountTransfer, TimeInForce, TradingClient,
+    TradingClientBuilder, TriggeredLeg, WriteOutcome,
 };
