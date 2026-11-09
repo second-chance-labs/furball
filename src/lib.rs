@@ -19,6 +19,9 @@
 //! - Validated market quantities without network calls: [`Price`] (dollars, strictly between 0
 //!   and 1, checkable against the market's tick size via [`Price::validate`]) and [`Count`]
 //!   (contracts, non-negative), plus cents/dollars conversions on [`Price`].
+//! - Order book helpers on [`types::Orderbook`]: best bid and ask on both sides (asks derived
+//!   as `1 -` the opposite bid), spread, mid price, depth at N levels, and taker fill cost
+//!   ([`FillCost`]) via [`types::Orderbook::cost_to_fill`].
 //!
 //! ```text
 //! caller -> routing (cutoff cache) -> pagination -> send_text (bucket -> sign -> HTTP -> 429 retry)
@@ -29,6 +32,7 @@ mod client;
 mod endpoints;
 mod error;
 mod fee_schedule;
+mod orderbook;
 mod pagination;
 mod portfolio;
 mod pricing;
@@ -48,6 +52,7 @@ pub use client::{
 pub use endpoints::{BATCH_CANDLESTICK_TICKERS, MarketFilter, MarketStatus, Period};
 pub use error::{KalshiError, Result};
 pub use fee_schedule::{FeeScheduleRow, build_fee_schedule};
+pub use orderbook::{BookError, FillCost};
 pub use portfolio::{FillFilter, OrderFilter, PositionFilter, SettlementFilter, SettlementStatus};
 pub use pricing::{Count, CountError, Price, PriceError};
 pub use rate_limit::{BATCH_CANCEL_COST, CF_BENCHMARKS_COST, DEFAULT_COST, GET_ORDER_COST, Tier};
