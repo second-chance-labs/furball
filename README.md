@@ -53,6 +53,12 @@ Fee type names and rounding come from Kalshi's docs. The fee schedule builder re
 
 The base coefficients are not in the API. They come from Kalshi's [fee schedule](https://kalshi.com/fee-schedule): 0.07 for takers and 0.0175 for makers on most markets. On combos, the maker fee is 50% of the taker fee. The `flat` fee formula is not documented.
 
+## Helpers
+
+Pure helpers that make no network calls:
+
+- Validated market quantities: `Price` (dollars, strictly between 0 and 1) and `Count` (contracts, non-negative). `Price::validate` checks a price against the market's tick size from `price_level_structure` or `price_ranges`; `Price::from_cents`/`Price::to_cents` convert between cents and dollars in `Decimal` arithmetic, never `f64`. `OrderBuilder` takes `Count` and `Price`.
+
 ## License
 
 MIT

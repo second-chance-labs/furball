@@ -16,6 +16,9 @@
 //! - Authenticated order and fill reads, live and archived: [`Client::get_order`],
 //!   [`Client::orders`], [`Client::fills`], [`Client::position_history`] and the queue-position
 //!   endpoints, split at the cached [`Cutoff`] and merged like trades.
+//! - Validated market quantities without network calls: [`Price`] (dollars, strictly between 0
+//!   and 1, checkable against the market's tick size via [`Price::validate`]) and [`Count`]
+//!   (contracts, non-negative), plus cents/dollars conversions on [`Price`].
 //!
 //! ```text
 //! caller -> routing (cutoff cache) -> pagination -> send_text (bucket -> sign -> HTTP -> 429 retry)
@@ -28,6 +31,7 @@ mod error;
 mod fee_schedule;
 mod pagination;
 mod portfolio;
+mod pricing;
 mod rate_limit;
 mod routing;
 #[cfg(feature = "trading")]
@@ -45,6 +49,7 @@ pub use endpoints::{BATCH_CANDLESTICK_TICKERS, MarketFilter, MarketStatus, Perio
 pub use error::{KalshiError, Result};
 pub use fee_schedule::{FeeScheduleRow, build_fee_schedule};
 pub use portfolio::{FillFilter, OrderFilter, PositionFilter, SettlementFilter, SettlementStatus};
+pub use pricing::{Count, CountError, Price, PriceError};
 pub use rate_limit::{BATCH_CANCEL_COST, CF_BENCHMARKS_COST, DEFAULT_COST, GET_ORDER_COST, Tier};
 pub use routing::{Cutoff, TradeId};
 
