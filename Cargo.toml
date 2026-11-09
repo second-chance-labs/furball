@@ -11,9 +11,14 @@ readme = "README.md"
 keywords = ["kalshi", "prediction-markets", "api-client", "sdk"]
 categories = ["api-bindings"]
 
+[features]
+default = []
+trading = []
+
 [dependencies]
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 futures = "0.3"
 governor = "0.10"
 rand = "0.8"

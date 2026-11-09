@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::rate_limit::Tier;
 use crate::routing::TradeId;
 
 /// Decodes a JSON number into a [`Decimal`] through its decimal text, never through `f64` arithmetic.
@@ -774,4 +775,131 @@ pub struct Settlement {
     /// Payout of a single yes contract, in cents, if the market paid out.
     #[serde(default)]
     pub value: Option<i64>,
+}
+
+/// Response of `GET /account/limits`: the account's usage tier, bucket limits, and grants.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AccountLimits {
+    /// Effective usage tier; `None` when Kalshi reports a tier this crate does not know yet.
+    #[serde(default, deserialize_with = "tier_or_none")]
+    pub usage_tier: Option<Tier>,
+    /// Read bucket limits.
+    pub read: BucketLimit,
+    /// Write bucket limits.
+    pub write: BucketLimit,
+    /// Grants that raise the usage level of an exchange instance.
+    pub grants: Vec<ApiUsageLevelGrant>,
+}
+
+/// The configured limits of one rate bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct BucketLimit {
+    /// Tokens added per second.
+    pub refill_rate: u32,
+    /// Maximum tokens the bucket holds.
+    pub bucket_capacity: u32,
+}
+
+/// A grant raising the usage level of one exchange instance.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ApiUsageLevelGrant {
+    /// Exchange instance the grant applies to.
+    pub exchange_instance: ExchangeInstance,
+    /// Granted usage level; `None` when Kalshi reports a tier this crate does not know yet.
+    #[serde(default, deserialize_with = "tier_or_none")]
+    pub level: Option<Tier>,
+    /// How the grant was earned.
+    pub source: GrantSource,
+    /// Expiry, Unix seconds; `None` for permanent grants.
+    #[serde(default)]
+    pub expires_ts: Option<i64>,
+}
+
+/// Exchange instance a usage-level grant applies to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum ExchangeInstance {
+    /// Event contracts.
+    EventContract,
+    /// Margined trading.
+    Margined,
+    /// An exchange instance this crate does not know yet, kept verbatim.
+    Other(String),
+}
+
+impl From<String> for ExchangeInstance {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "event_contract" => Self::EventContract,
+            "margined" => Self::Margined,
+            _ => Self::Other(value),
+        }
+    }
+}
+
+impl From<ExchangeInstance> for String {
+    fn from(value: ExchangeInstance) -> Self {
+        match value {
+            ExchangeInstance::EventContract => "event_contract".into(),
+            ExchangeInstance::Margined => "margined".into(),
+            ExchangeInstance::Other(other) => other,
+        }
+    }
+}
+
+/// How a usage-level grant was earned.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum GrantSource {
+    /// Earned through trading volume.
+    Volume,
+    /// Applied manually by Kalshi.
+    Manual,
+    /// A source this crate does not know yet, kept verbatim.
+    Other(String),
+}
+
+impl From<String> for GrantSource {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "volume" => Self::Volume,
+            "manual" => Self::Manual,
+            _ => Self::Other(value),
+        }
+    }
+}
+
+impl From<GrantSource> for String {
+    fn from(value: GrantSource) -> Self {
+        match value {
+            GrantSource::Volume => "volume".into(),
+            GrantSource::Manual => "manual".into(),
+            GrantSource::Other(other) => other,
+        }
+    }
+}
+
+/// Response of `GET /account/endpoint_costs`: the default cost plus every endpoint that deviates.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct EndpointCosts {
+    /// Token cost of an endpoint not listed in [`Self::endpoint_costs`].
+    pub default_cost: u32,
+    /// Endpoints whose cost differs from [`Self::default_cost`].
+    pub endpoint_costs: Vec<EndpointCost>,
+}
+
+/// The configured cost of one endpoint.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct EndpointCost {
+    /// HTTP method, for example `GET` or `POST`.
+    pub method: String,
+    /// Path relative to the base URL, for example `/portfolio/orders`.
+    pub path: String,
+    /// Token cost.
+    pub cost: u32,
+}
+
+fn tier_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Tier>, D::Error> {
+    let name = String::deserialize(deserializer)?;
+    Ok(Tier::from_name(&name))
 }

@@ -4,16 +4,17 @@ use std::time::Duration;
 use rand::Rng;
 use reqwest::header::RETRY_AFTER;
 use reqwest::{Method, StatusCode};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use url::Url;
 
 use crate::auth::{
-    ACCESS_KEY_HEADER, ACCESS_SIGNATURE_HEADER, ACCESS_TIMESTAMP_HEADER, Credentials,
+    ACCESS_KEY_HEADER, ACCESS_SIGNATURE_HEADER, ACCESS_TIMESTAMP_HEADER, Credentials, SignedHeaders,
 };
-use crate::error::{KalshiError, Result};
-use crate::rate_limit::{BalanceBucket, DEFAULT_COST, ReadBucket, Tier};
+use crate::error::{ApiError, KalshiError, Result};
+use crate::rate_limit::{BucketKind, DEFAULT_COST, Tier, TokenBucket};
 use crate::routing::Cutoff;
 
 /// Production base URL.
@@ -26,26 +27,66 @@ pub const DEMO_URL: &str = "https://demo-api.kalshi.co/trade-api/v2";
 /// Maximum attempts for one request, counting the first.
 pub const MAX_ATTEMPTS: u32 = 5;
 
-/// One GET request: where it goes, what it costs, and whether it must be signed.
+/// One Kalshi API request: method, where it goes, what it costs, which rate bucket it draws
+/// from, whether it must be signed, and whether it is safe to retry.
 #[derive(Debug, Clone)]
 pub struct Request {
+    pub(crate) method: Method,
     pub(crate) path: String,
     pub(crate) query: Vec<(String, String)>,
+    pub(crate) body: Option<serde_json::Value>,
     pub(crate) cost: u32,
+    pub(crate) bucket: BucketKind,
     pub(crate) authenticated: bool,
-    pub(crate) balance: bool,
+    pub(crate) idempotent: bool,
+    pub(crate) halted: Option<fn() -> bool>,
 }
 
 impl Request {
-    /// A public read costing the default 10 tokens. `path` is relative to the base URL and starts with `/`.
+    /// A GET read costing the default 10 tokens from the Read bucket. `path` is relative to the
+    /// base URL and starts with `/`. Idempotent: a failure after dispatch surfaces as
+    /// [`KalshiError::Transport`].
     pub fn get(path: impl Into<String>) -> Self {
+        Self::new(Method::GET, path, true, BucketKind::Read)
+    }
+
+    /// A POST write costing the default 10 tokens from the Write bucket. Not idempotent by
+    /// default: a timeout, connection failure, or HTTP 5xx surfaces as
+    /// [`KalshiError::Ambiguous`] because the write may have landed. Callers that make a POST
+    /// safe to retry (for example by supplying a `client_order_id`) should mark it idempotent.
+    pub fn post(path: impl Into<String>) -> Self {
+        Self::new(Method::POST, path, false, BucketKind::Write)
+    }
+
+    /// A PUT write costing the default 10 tokens from the Write bucket. Idempotent by method.
+    pub fn put(path: impl Into<String>) -> Self {
+        Self::new(Method::PUT, path, true, BucketKind::Write)
+    }
+
+    /// A DELETE write costing the default 10 tokens from the Write bucket. Idempotent by method.
+    pub fn delete(path: impl Into<String>) -> Self {
+        Self::new(Method::DELETE, path, true, BucketKind::Write)
+    }
+
+    fn new(method: Method, path: impl Into<String>, idempotent: bool, bucket: BucketKind) -> Self {
         Self {
+            method,
             path: path.into(),
             query: Vec::new(),
+            body: None,
             cost: DEFAULT_COST,
+            bucket,
             authenticated: false,
-            balance: false,
+            idempotent,
+            halted: None,
         }
+    }
+
+    /// Attaches a JSON request body. The body is never part of the signature.
+    pub fn body(mut self, body: impl Serialize) -> Self {
+        self.body =
+            Some(serde_json::to_value(body).expect("request body must be JSON-serializable"));
+        self
     }
 
     /// Adds a query parameter.
@@ -62,9 +103,17 @@ impl Request {
         }
     }
 
-    /// Sets the token cost this endpoint declares.
+    /// Sets the token cost this endpoint declares. Batch calls bill per item: pass the sum.
     pub fn cost(mut self, cost: u32) -> Self {
         self.cost = cost;
+        self
+    }
+
+    /// Draws from the dedicated balance bucket (one token per second on Basic and Advanced,
+    /// five per second above) instead of the Read bucket.
+    pub fn balance(mut self) -> Self {
+        self.bucket = BucketKind::Balance;
+        self.cost = 1;
         self
     }
 
@@ -74,10 +123,16 @@ impl Request {
         self
     }
 
-    /// Throttles the request with the portfolio balance bucket ([`Tier::balance_budget`] requests
-    /// per second) instead of the Read budget; the two budgets never draw from each other.
-    pub fn balance(mut self) -> Self {
-        self.balance = true;
+    /// Sets whether the request is safe to retry after a timeout, connection failure, or
+    /// HTTP 5xx. GET, PUT and DELETE default to `true`; POST defaults to `false`.
+    pub fn idempotent(mut self, idempotent: bool) -> Self {
+        self.idempotent = idempotent;
+        self
+    }
+
+    #[cfg(feature = "trading")]
+    pub(crate) fn halted_when(mut self, halted: fn() -> bool) -> Self {
+        self.halted = Some(halted);
         self
     }
 }
@@ -147,8 +202,17 @@ impl ClientBuilder {
                 http: reqwest::Client::new(),
                 base,
                 credentials: self.credentials,
-                bucket: ReadBucket::new(self.tier.read_budget(), self.tier.read_capacity()),
-                balance_bucket: BalanceBucket::new(self.tier.balance_budget()),
+                read: TokenBucket::new("read", self.tier.read_budget(), self.tier.read_capacity()),
+                write: TokenBucket::new(
+                    "write",
+                    self.tier.write_budget(),
+                    self.tier.write_capacity(),
+                ),
+                balance: TokenBucket::new(
+                    "balance",
+                    self.tier.balance_budget(),
+                    self.tier.balance_budget(),
+                ),
                 backoff_base: self.backoff_base,
                 cutoff_ttl: self.cutoff_ttl,
                 cutoff: Mutex::new(None),
@@ -161,8 +225,9 @@ pub(crate) struct Inner {
     http: reqwest::Client,
     base: Url,
     credentials: Option<Credentials>,
-    bucket: ReadBucket,
-    balance_bucket: BalanceBucket,
+    read: TokenBucket,
+    write: TokenBucket,
+    balance: TokenBucket,
     backoff_base: Duration,
     pub(crate) cutoff_ttl: Duration,
     pub(crate) cutoff: Mutex<Option<(Instant, Cutoff)>>,
@@ -190,12 +255,19 @@ impl Client {
         let inner = &self.inner;
         let mut attempt = 1;
         loop {
-            if request.balance {
-                inner.balance_bucket.acquire().await;
-            } else {
-                inner.bucket.acquire(request.cost).await;
+            let bucket = match request.bucket {
+                BucketKind::Read => &inner.read,
+                BucketKind::Write => &inner.write,
+                BucketKind::Balance => &inner.balance,
+            };
+            bucket.acquire(request.cost).await?;
+            if request.halted.is_some_and(|halted| halted()) {
+                return Err(KalshiError::TradingHalted);
             }
-            let response = self.build(request)?.send().await?;
+            let response = match self.build(request)?.send().await {
+                Ok(response) => response,
+                Err(error) => return Err(transport_failure(request, error)),
+            };
             let status = response.status();
             if status == StatusCode::TOO_MANY_REQUESTS {
                 if attempt >= MAX_ATTEMPTS {
@@ -213,11 +285,21 @@ impl Client {
                 attempt += 1;
                 continue;
             }
-            let body = response.text().await?;
+            let body = match response.text().await {
+                Ok(body) => body,
+                Err(error) => return Err(transport_failure(request, error)),
+            };
             return match status {
                 status if status.is_success() => Ok(body),
                 StatusCode::NOT_FOUND => Err(KalshiError::NotFound),
-                status => Err(KalshiError::Http { status, body }),
+                status if status.is_server_error() && !request.idempotent => {
+                    Err(KalshiError::Ambiguous(format!(
+                        "Kalshi answered HTTP {} ({}); the write may have landed",
+                        status.as_u16(),
+                        error_detail(&body)
+                    )))
+                }
+                status => Err(decode_error(status, body)),
             };
         }
     }
@@ -232,17 +314,15 @@ impl Client {
         let inner = &self.inner;
         let base = inner.base.as_str().trim_end_matches('/');
         let url = format!("{base}{}", request.path);
-        let mut builder = inner.http.request(Method::GET, url).query(&request.query);
+        let mut builder = inner
+            .http
+            .request(request.method.clone(), url)
+            .query(&request.query);
+        if let Some(body) = &request.body {
+            builder = builder.json(body);
+        }
         if request.authenticated {
-            let credentials = inner.credentials.as_ref().ok_or_else(|| {
-                KalshiError::Auth("endpoint requires credentials but none were configured".into())
-            })?;
-            let sign_path = format!(
-                "{}{}",
-                inner.base.path().trim_end_matches('/'),
-                request.path
-            );
-            let headers = credentials.sign_now("GET", &sign_path);
+            let headers = self.signed_headers(request)?;
             builder = builder
                 .header(ACCESS_KEY_HEADER, headers.key_id)
                 .header(ACCESS_TIMESTAMP_HEADER, headers.timestamp)
@@ -250,4 +330,50 @@ impl Client {
         }
         Ok(builder)
     }
+
+    /// Computes the auth headers for `request`; fails with [`KalshiError::Auth`] when the client
+    /// has no credentials. The body is never part of the signature.
+    pub(crate) fn signed_headers(&self, request: &Request) -> Result<SignedHeaders> {
+        let inner = &self.inner;
+        let credentials = inner.credentials.as_ref().ok_or_else(|| {
+            KalshiError::Auth("endpoint requires credentials but none were configured".into())
+        })?;
+        let sign_path = format!(
+            "{}{}",
+            inner.base.path().trim_end_matches('/'),
+            request.path
+        );
+        Ok(credentials.sign_now(request.method.as_str(), &sign_path))
+    }
+}
+
+/// A request that failed without an HTTP response: for idempotent requests that is an ordinary
+/// [`KalshiError::Transport`], for non-idempotent ones the outcome is unknown.
+fn transport_failure(request: &Request, error: reqwest::Error) -> KalshiError {
+    if request.idempotent {
+        KalshiError::from(error)
+    } else if error.is_timeout() {
+        KalshiError::Ambiguous("request timed out; the write may have landed".into())
+    } else {
+        KalshiError::Ambiguous("connection to Kalshi failed; the write may have landed".into())
+    }
+}
+
+/// Decodes a Kalshi error response: its JSON envelope when present, raw text otherwise.
+fn decode_error(status: StatusCode, body: String) -> KalshiError {
+    match serde_json::from_str::<ApiError>(&body) {
+        Ok(error) => KalshiError::Api {
+            status,
+            code: error.code,
+            message: error.message,
+        },
+        Err(_) => KalshiError::Http { status, body },
+    }
+}
+
+/// Renders an error body as `code: message` when it is a Kalshi JSON envelope, else raw text.
+fn error_detail(body: &str) -> String {
+    serde_json::from_str::<ApiError>(body)
+        .map(|error| format!("code {}: {}", error.code, error.message))
+        .unwrap_or_else(|_| body.to_owned())
 }
