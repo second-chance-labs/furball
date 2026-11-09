@@ -10,6 +10,8 @@ surface is opt-in behind the `trading` cargo feature.
 - GET, POST, PUT and DELETE transport with JSON bodies. A non-idempotent write that fails after dispatch (timeout, connection failure, HTTP 5xx) yields `KalshiError::Ambiguous` instead of being retried.
 - Cursor pagination as a lazy `Stream`.
 - Transparent routing between live and historical endpoints (markets, candlesticks, trades) using the cached `/historical/cutoff`.
+- Authenticated portfolio reads: balance (its own per-second bucket), positions, settlements, subaccount balances.
+- Authenticated order and fill reads: one order (2 tokens), order lists, fills, queue positions, and complete position history; live/archive split at the cutoff, merged like trades.
 - Typed responses; money and counts are `rust_decimal::Decimal`, never `f64`.
 - Fee schedule builder: series fees and event overrides as non-overlapping intervals.
 
