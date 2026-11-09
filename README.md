@@ -58,6 +58,7 @@ The base coefficients are not in the API. They come from Kalshi's [fee schedule]
 Pure helpers that make no network calls:
 
 - Validated market quantities: `Price` (dollars, strictly between 0 and 1) and `Count` (contracts, non-negative). `Price::validate` checks a price against the market's tick size from `price_level_structure` or `price_ranges`; `Price::from_cents`/`Price::to_cents` convert between cents and dollars in `Decimal` arithmetic, never `f64`. `OrderBuilder` takes `Count` and `Price`.
+- Order book helpers on `Orderbook`: best bid and ask on both sides (Kalshi returns bids only; each ask is derived as `1 -` the opposite bid), spread, mid price, depth at N levels, and `cost_to_fill(side, count)` returning the volume-weighted average price and total cost, or `BookError::TooThin` when the book cannot cover the request.
 
 ## License
 
