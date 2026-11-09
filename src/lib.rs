@@ -54,6 +54,6 @@ pub use trading::{
     BatchItemError, CancelledOrder, CreateOrderV2, CreatedSubaccount, DecreaseAmount,
     DecreasedOrder, DryRun, Environment, EventContractExitTrigger, ExitSlippage, ExitTrigger,
     ExitTriggerKind, ExitTriggerStatus, NewOrderGroup, Order, OrderBuilder, OrderGroup, OrderSide,
-    SelfTradePrevention, SlippageUnit, SubaccountTransfer, TimeInForce, TradingClient,
-    TradingClientBuilder, TriggeredLeg, WriteOutcome,
+    PLACE_AND_CONFIRM_MAX_TRIES, SelfTradePrevention, SlippageUnit, SubaccountTransfer,
+    TimeInForce, TradingClient, TradingClientBuilder, TriggeredLeg, WriteOutcome,
 };

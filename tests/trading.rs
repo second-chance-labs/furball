@@ -8,7 +8,7 @@ use std::time::Duration;
 use common::{API_PREFIX, KEY_ID, credentials, verify_rsa as verify};
 use furball::{
     AmendOrder, CreateOrderV2, DecreaseAmount, KalshiError, OrderBuilder, OrderSide,
-    SelfTradePrevention, TimeInForce, TradingClient, WriteOutcome,
+    PLACE_AND_CONFIRM_MAX_TRIES, SelfTradePrevention, TimeInForce, TradingClient, WriteOutcome,
 };
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
@@ -1547,5 +1547,199 @@ async fn update_subaccount_netting_sends_the_subaccount_and_flag() {
     {
         WriteOutcome::Sent(()) => {}
         WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+}
+
+#[tokio::test]
+async fn place_and_confirm_success_sends_a_generated_client_order_id() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/events/orders")))
+        .and(header_exists(furball::ACCESS_SIGNATURE_HEADER))
+        .respond_with(|request: &MockRequest| {
+            let sent: Value = serde_json::from_slice(&request.body).expect("json body");
+            let id = sent["client_order_id"].as_str().unwrap_or_default();
+            ResponseTemplate::new(201).set_body_json(json!({
+                "order_id": "o1",
+                "client_order_id": id,
+                "fill_count": "0",
+                "remaining_count": "10",
+                "ts_ms": 1_700_000_000_000i64
+            }))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    match client
+        .place_and_confirm(&order(None))
+        .await
+        .expect("confirmed")
+    {
+        WriteOutcome::Sent(sent) => {
+            let id = sent.client_order_id.expect("echoed id");
+            assert_eq!(id.len(), 36);
+            assert_eq!(id.chars().nth(8), Some('-'));
+            assert_eq!(id.chars().nth(13), Some('-'));
+            assert_eq!(id.chars().nth(14), Some('4'));
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+    let requests = server.received_requests().await.expect("log");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method.as_str(), "POST");
+}
+
+#[tokio::test]
+async fn place_and_confirm_returns_the_found_order_after_an_ambiguous_send() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/events/orders")))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_json(json!({ "code": 5000, "message": "boom" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{API_PREFIX}/portfolio/orders")))
+        .and(query_param("ticker", "KXUPDOWN-25DEC"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "orders": [fixture_value("portfolio_order")],
+            "cursor": ""
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    match client
+        .place_and_confirm(&order(Some("c-confirm")))
+        .await
+        .expect("confirmed")
+    {
+        WriteOutcome::Sent(sent) => {
+            assert_eq!(sent.order_id, "o-confirm");
+            assert_eq!(sent.client_order_id.as_deref(), Some("c-confirm"));
+            assert_eq!(sent.fill_count, Decimal::new(5, 0));
+            assert_eq!(sent.remaining_count, Decimal::new(5, 0));
+            assert_eq!(sent.average_fill_price, None);
+            assert_eq!(sent.average_fee_paid, None);
+            assert_eq!(sent.ts_ms, 1_793_531_100_000);
+        }
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+    let requests = server.received_requests().await.expect("log");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].method.as_str(), "GET");
+}
+
+#[tokio::test]
+async fn place_and_confirm_retries_with_the_same_id_when_the_order_is_not_there() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    let sends = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = sends.clone();
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/events/orders")))
+        .respond_with(move |_request: &MockRequest| {
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if n == 1 {
+                ResponseTemplate::new(500).set_body_json(json!({ "code": 5000, "message": "boom" }))
+            } else {
+                ResponseTemplate::new(201).set_body_json(json!({
+                    "order_id": "o1",
+                    "client_order_id": "c-confirm",
+                    "fill_count": "0",
+                    "remaining_count": "10",
+                    "ts_ms": 1_700_000_000_000i64
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{API_PREFIX}/portfolio/orders")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "orders": [], "cursor": "" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    match client
+        .place_and_confirm(&order(Some("c-confirm")))
+        .await
+        .expect("confirmed")
+    {
+        WriteOutcome::Sent(sent) => assert_eq!(sent.order_id, "o1"),
+        WriteOutcome::DryRun(_) => panic!("not a dry run"),
+    }
+    let posts: Vec<Value> = server
+        .received_requests()
+        .await
+        .expect("log")
+        .into_iter()
+        .filter(|request| request.method.as_str() == "POST")
+        .map(|request| serde_json::from_slice(&request.body).expect("json body"))
+        .collect();
+    assert_eq!(posts.len(), 2);
+    let ids: Vec<&str> = posts
+        .iter()
+        .map(|body| body["client_order_id"].as_str().expect("id"))
+        .collect();
+    assert_eq!(ids, ["c-confirm", "c-confirm"]);
+}
+
+#[tokio::test]
+async fn place_and_confirm_gives_up_after_the_fixed_number_of_ambiguous_tries() {
+    let _serial = WRITES.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("{API_PREFIX}/portfolio/events/orders")))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_json(json!({ "code": 5000, "message": "boom" })),
+        )
+        .expect(PLACE_AND_CONFIRM_MAX_TRIES as u64)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{API_PREFIX}/portfolio/orders")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "orders": [], "cursor": "" })),
+        )
+        .expect(PLACE_AND_CONFIRM_MAX_TRIES as u64)
+        .mount(&server)
+        .await;
+
+    let client = trading_client(&server);
+    let error = client
+        .place_and_confirm(&order(Some("c-confirm")))
+        .await
+        .expect_err("gives up");
+    let KalshiError::Ambiguous(detail) = &error else {
+        panic!("expected ambiguous, got {error:?}")
+    };
+    assert!(detail.contains("c-confirm"), "{detail}");
+    assert!(
+        detail.contains(&PLACE_AND_CONFIRM_MAX_TRIES.to_string()),
+        "{detail}"
+    );
+    let posts: Vec<Value> = server
+        .received_requests()
+        .await
+        .expect("log")
+        .into_iter()
+        .filter(|request| request.method.as_str() == "POST")
+        .map(|request| serde_json::from_slice(&request.body).expect("json body"))
+        .collect();
+    assert_eq!(posts.len(), PLACE_AND_CONFIRM_MAX_TRIES as usize);
+    for body in &posts {
+        assert_eq!(body["client_order_id"].as_str(), Some("c-confirm"));
     }
 }
