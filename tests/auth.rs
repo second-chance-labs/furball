@@ -2,13 +2,16 @@ mod common;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use common::{API_PREFIX, KEY_ID, client, credentials, pem, private_key};
+use common::{
+    API_PREFIX, KEY_ID, client, client_with, credentials, ed25519_credentials, ed25519_key,
+    ed25519_pem, pem, pkcs1_pem, private_key,
+};
+use ed25519_dalek::Verifier;
 use furball::{
     ACCESS_KEY_HEADER, ACCESS_SIGNATURE_HEADER, ACCESS_TIMESTAMP_HEADER, Credentials, KalshiError,
-    Request,
+    KeyType, Request,
 };
 use rsa::pss::{Signature, VerifyingKey};
-use rsa::signature::Verifier;
 use serde_json::Value;
 use sha2::Sha256;
 use wiremock::matchers::{header_exists, method, path};
@@ -19,6 +22,18 @@ fn verify(timestamp: &str, http_method: &str, signed_path: &str, signature: &str
     let bytes = STANDARD.decode(signature).expect("base64");
     let signature = Signature::try_from(bytes.as_slice()).expect("signature bytes");
     verifying_key
+        .verify(
+            format!("{timestamp}{http_method}{signed_path}").as_bytes(),
+            &signature,
+        )
+        .is_ok()
+}
+
+fn verify_ed(timestamp: &str, http_method: &str, signed_path: &str, signature: &str) -> bool {
+    let bytes = STANDARD.decode(signature).expect("base64");
+    let signature = ed25519_dalek::Signature::try_from(bytes.as_slice()).expect("signature bytes");
+    ed25519_key()
+        .verifying_key()
         .verify(
             format!("{timestamp}{http_method}{signed_path}").as_bytes(),
             &signature,
@@ -200,4 +215,114 @@ fn from_env_loads_key_from_file_and_reports_missing_variables_by_name() {
     };
     let error = Credentials::from_env().expect_err("file missing");
     assert!(!format!("{error}").contains(KEY_ID));
+}
+
+#[test]
+fn rsa_pkcs8_key_reports_rsa_key_type() {
+    assert_eq!(credentials().key_type(), KeyType::Rsa);
+}
+
+#[test]
+fn rsa_pkcs1_key_is_detected_and_signs() {
+    let credentials = Credentials::from_pem(KEY_ID, &pkcs1_pem()).expect("credentials");
+    assert_eq!(credentials.key_type(), KeyType::Rsa);
+    let headers = credentials.sign(42, "PUT", "/trade-api/v2/portfolio/orders/x");
+    assert_eq!(headers.key_id, KEY_ID);
+    assert_eq!(headers.timestamp, "42");
+    assert!(verify(
+        "42",
+        "PUT",
+        "/trade-api/v2/portfolio/orders/x",
+        &headers.signature
+    ));
+}
+
+#[test]
+fn ed25519_signature_round_trips_and_key_type_is_reported() {
+    let credentials = Credentials::from_pem(KEY_ID, &ed25519_pem()).expect("credentials");
+    assert_eq!(credentials.key_type(), KeyType::Ed25519);
+    let headers = credentials.sign(
+        1_703_123_456_789,
+        "POST",
+        "/trade-api/v2/portfolio/orders?limit=5",
+    );
+    assert_eq!(headers.key_id, KEY_ID);
+    assert_eq!(headers.timestamp, "1703123456789");
+    assert!(verify_ed(
+        &headers.timestamp,
+        "POST",
+        "/trade-api/v2/portfolio/orders",
+        &headers.signature
+    ));
+    assert!(!verify_ed(
+        &headers.timestamp,
+        "GET",
+        "/trade-api/v2/portfolio/orders",
+        &headers.signature
+    ));
+    assert!(!verify_ed(
+        "1703123456790",
+        "POST",
+        "/trade-api/v2/portfolio/orders",
+        &headers.signature
+    ));
+}
+
+#[test]
+fn ed25519_signature_fails_rsa_pss_verification() {
+    let ed = Credentials::from_pem(KEY_ID, &ed25519_pem()).expect("credentials");
+    let headers = ed.sign(1, "POST", "/p");
+    assert!(!verify("1", "POST", "/p", &headers.signature));
+}
+
+#[tokio::test]
+async fn authenticated_request_signs_with_ed25519() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("{API_PREFIX}/private")))
+        .and(header_exists(ACCESS_KEY_HEADER))
+        .and(header_exists(ACCESS_TIMESTAMP_HEADER))
+        .and(header_exists(ACCESS_SIGNATURE_HEADER))
+        .respond_with(|request: &MockRequest| {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .expect("header")
+                    .to_str()
+                    .expect("utf8")
+                    .to_owned()
+            };
+            let valid = header(ACCESS_KEY_HEADER) == KEY_ID
+                && verify_ed(
+                    &header(ACCESS_TIMESTAMP_HEADER),
+                    "GET",
+                    &format!("{API_PREFIX}/private"),
+                    &header(ACCESS_SIGNATURE_HEADER),
+                );
+            ResponseTemplate::new(if valid { 200 } else { 401 })
+                .set_body_json(serde_json::json!({}))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = client_with(&server, ed25519_credentials());
+    client
+        .send::<Value>(&Request::get("/private").query("limit", 5).authenticated())
+        .await
+        .expect("ed25519-signed request accepted");
+}
+
+#[test]
+fn ed25519_debug_and_error_output_never_contain_credentials() {
+    let credentials = ed25519_credentials();
+    let rendered = [
+        format!("{:?}", credentials),
+        format!("{:?}", credentials.sign(1, "POST", "/x")),
+        format!("{:?}", KeyType::Ed25519),
+    ]
+    .join("\n");
+    assert!(!rendered.contains(KEY_ID));
+    assert!(!rendered.contains("PRIVATE KEY"));
 }
