@@ -45,11 +45,15 @@ pub use endpoints::{BATCH_CANDLESTICK_TICKERS, MarketFilter, MarketStatus, Perio
 pub use error::{KalshiError, Result};
 pub use fee_schedule::{FeeScheduleRow, build_fee_schedule};
 pub use portfolio::{FillFilter, OrderFilter, PositionFilter, SettlementFilter, SettlementStatus};
-pub use rate_limit::{CF_BENCHMARKS_COST, DEFAULT_COST, GET_ORDER_COST, Tier};
+pub use rate_limit::{BATCH_CANCEL_COST, CF_BENCHMARKS_COST, DEFAULT_COST, GET_ORDER_COST, Tier};
 pub use routing::{Cutoff, TradeId};
 
 #[cfg(feature = "trading")]
 pub use trading::{
-    CancelledOrder, DryRun, Environment, NewOrder, Order, OrderSide, SelfTradePrevention,
-    TimeInForce, TradingClient, TradingClientBuilder, WriteOutcome,
+    AmendOrder, AmendedOrder, BatchCancelOrder, BatchCancelResult, BatchCreateResult,
+    BatchItemError, CancelledOrder, CreateOrderV2, CreatedSubaccount, DecreaseAmount,
+    DecreasedOrder, DryRun, Environment, EventContractExitTrigger, ExitSlippage, ExitTrigger,
+    ExitTriggerKind, ExitTriggerStatus, NewOrderGroup, Order, OrderBuilder, OrderGroup, OrderSide,
+    PLACE_AND_CONFIRM_MAX_TRIES, SelfTradePrevention, SlippageUnit, SubaccountTransfer,
+    TimeInForce, TradingClient, TradingClientBuilder, TriggeredLeg, WriteOutcome,
 };
