@@ -441,6 +441,15 @@ impl FakeExchange {
                 });
             }
         }
+        FeeCalculator::new(inner.coefficients.clone())
+            .model_fee(
+                inner.fee_type.clone(),
+                inner.fee_multiplier,
+                FeeSide::Taker,
+                order.price,
+                order.count,
+            )
+            .map_err(ExchangeError::Fee)?;
 
         inner.order_counter += 1;
         let order_id = format!("fake-order-{}", inner.order_counter);

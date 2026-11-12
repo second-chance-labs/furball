@@ -585,3 +585,23 @@ fn a_two_leg_strategy_captures_the_spread() {
     assert_eq!(position.fees_paid_dollars, d("3.34"));
     assert_eq!(exchange.balance(), d("1006.66"));
 }
+
+#[test]
+fn undocumented_fee_type_rejects_order_without_touching_state() {
+    let exchange = FakeExchange::new(d("1000")).fee_schedule(furball::types::FeeType::Flat, d("1"));
+    exchange.add_market("KXTEST");
+    exchange
+        .add_liquidity("KXTEST", OrderSide::Ask, price("0.55"), Count::from(100))
+        .unwrap();
+
+    let result = exchange.create_order(&limit_order(
+        "KXTEST",
+        OrderSide::Bid,
+        10,
+        "0.60",
+        TimeInForce::GoodTillCanceled,
+    ));
+
+    assert!(matches!(result, Err(ExchangeError::Fee(_))));
+    assert_eq!(exchange.balance(), d("1000"));
+}
