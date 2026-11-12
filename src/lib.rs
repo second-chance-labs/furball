@@ -11,11 +11,31 @@
 //!   and historical endpoints using the cached [`Cutoff`].
 //! - The trading write surface (`TradingClient`) is behind the `trading` cargo feature, off by
 //!   default: a default build contains no write methods.
+//! - The `testing` feature (which enables `trading`) adds an in-process fake exchange
+//!   (`testing::FakeExchange`): price-and-time priority matching for limit orders
+//!   (good-till-canceled, immediate-or-cancel, fill-or-kill), fees from [`FeeCalculator`],
+//!   balance, position and settlement tracking, and a test-controlled clock, market data
+//!   and settlement.
 //! - Authenticated portfolio reads: [`Client::balance`] (its own per-second bucket),
 //!   [`Client::positions`], [`Client::settlements`] and [`Client::subaccount_balances`].
 //! - Authenticated order and fill reads, live and archived: [`Client::get_order`],
 //!   [`Client::orders`], [`Client::fills`], [`Client::position_history`] and the queue-position
 //!   endpoints, split at the cached [`Cutoff`] and merged like trades.
+//! - Validated market quantities without network calls: [`Price`] (dollars, strictly between 0
+//!   and 1, checkable against the market's tick size via [`Price::validate`]) and [`Count`]
+//!   (contracts, non-negative), plus cents/dollars conversions on [`Price`].
+//! - Order book helpers on [`types::Orderbook`]: best bid and ask on both sides (asks derived
+//!   as `1 -` the opposite bid), spread, mid price, depth at N levels, and taker fill cost
+//!   ([`FillCost`]) via [`types::Orderbook::cost_to_fill`].
+//! - Position math from fills: the settlement payoff of yes and no positions on binary
+//!   and scalar markets ([`payoff_at_settlement`]), realized and unrealized profit and
+//!   loss with fees subtracted ([`realized_pnl`], [`unrealized_pnl`]), and the
+//!   volume-weighted average entry price ([`average_entry_price`]).
+//! - Fee calculator ([`FeeCalculator`]): the quadratic fee formulas with the published
+//!   coefficients ([`FeeCoefficients`], overridable via environment variables), Kalshi's
+//!   rounding pipeline (trade fee rounded up to $0.000001, balance alignment, per-order
+//!   rebates in [`FeeAccumulator`]), and [`fee_in_force`] to resolve the fee type and
+//!   multiplier from a [`build_fee_schedule`] at the fill time.
 //! - RFQ and quote reads for negotiated trades: [`Client::get_rfq`], [`Client::list_rfqs`],
 //!   [`Client::get_quote`] and [`Client::list_quotes`]; their writes (create, delete, accept,
 //!   confirm) live on the trading surface, along with the RFQ batch writes that quote several
@@ -34,10 +54,16 @@ mod communications;
 mod endpoints;
 mod error;
 mod fee_schedule;
+mod fees;
+mod orderbook;
 mod pagination;
+mod pnl;
 mod portfolio;
+mod pricing;
 mod rate_limit;
 mod routing;
+#[cfg(feature = "testing")]
+pub mod testing;
 #[cfg(feature = "trading")]
 mod trading;
 pub mod types;
@@ -56,7 +82,18 @@ pub use communications::{
 pub use endpoints::{BATCH_CANDLESTICK_TICKERS, MarketFilter, MarketStatus, Period};
 pub use error::{KalshiError, Result};
 pub use fee_schedule::{FeeScheduleRow, build_fee_schedule};
+pub use fees::{
+    BalancePrecision, FEE_COMBO_MAKER_ENV, FEE_MAKER_ENV, FEE_TAKER_ENV, FeeAccumulator,
+    FeeBreakdown, FeeCalculator, FeeCoefficientError, FeeCoefficients, FeeError, FeeSide,
+    ScheduledFee, fee_in_force,
+};
+pub use orderbook::{BookError, FillCost};
+pub use pnl::{
+    PnlError, SettlementError, average_entry_price, payoff_at_settlement, realized_pnl,
+    unrealized_pnl,
+};
 pub use portfolio::{FillFilter, OrderFilter, PositionFilter, SettlementFilter, SettlementStatus};
+pub use pricing::{Count, CountError, Price, PriceError};
 pub use rate_limit::{BATCH_CANCEL_COST, CF_BENCHMARKS_COST, DEFAULT_COST, GET_ORDER_COST, Tier};
 pub use routing::{Cutoff, TradeId};
 

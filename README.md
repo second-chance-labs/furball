@@ -47,11 +47,24 @@ let client = furball::TradingClient::builder()
 - `dry_run(true)` validates and signs each write but returns `WriteOutcome::DryRun` instead of sending.
 - Every write attempt is logged at `info` (method, path, ticker, client order ID), never keys or signatures.
 
+## Testing (opt-in)
+
+`furball::testing::FakeExchange` (behind the `testing` cargo feature, which enables `trading`) is an in-process fake exchange for testing strategies without Kalshi: price-and-time priority matching for limit orders (good-till-canceled, immediate-or-cancel, fill-or-kill), fills at the resting price, fees from `FeeCalculator` with a per-order accumulator, and tracked balance, positions, realized P&L and settlements. The test controls the clock, injects counterparty liquidity and market data, and settles markets. Its module docs carry a worked strategy example.
+
 ## Fees
 
 Fee type names and rounding come from Kalshi's docs. The fee schedule builder reads fee types and multipliers from the API.
 
 The base coefficients are not in the API. They come from Kalshi's [fee schedule](https://kalshi.com/fee-schedule): 0.07 for takers and 0.0175 for makers on most markets. On combos, the maker fee is 50% of the taker fee. The `flat` fee formula is not documented.
+
+## Helpers
+
+Pure helpers that make no network calls:
+
+- Validated market quantities: `Price` (dollars, strictly between 0 and 1) and `Count` (contracts, non-negative). `Price::validate` checks a price against the market's tick size from `price_level_structure` or `price_ranges`; `Price::from_cents`/`Price::to_cents` convert between cents and dollars in `Decimal` arithmetic, never `f64`. `OrderBuilder` takes `Count` and `Price`.
+- Order book helpers on `Orderbook`: best bid and ask on both sides (Kalshi returns bids only; each ask is derived as `1 -` the opposite bid), spread, mid price, depth at N levels, and `cost_to_fill(side, count)` returning the volume-weighted average price and total cost, or `BookError::TooThin` when the book cannot cover the request.
+- Position math from fills, in Kalshi's netting model: the settlement payoff of yes and no positions on binary and scalar markets (`payoff_at_settlement`), realized and unrealized profit and loss with fees subtracted (`realized_pnl`, `unrealized_pnl`), and the volume-weighted average entry price (`average_entry_price`).
+- Fee calculator: `FeeCalculator` computes a fill's fee exactly as Kalshi does — the quadratic formula family with the published coefficients (`FeeCoefficients::default`; overridable via `FURBALL_FEE_TAKER`/`FURBALL_FEE_MAKER`/`FURBALL_FEE_COMBO_MAKER`), the fee-rounding pipeline (trade fee rounded up to $0.000001, balance alignment to $0.01 or $0.0001, per-order rebate accumulator), and `fee_in_force` to resolve the fee type and multiplier from a fee schedule at the fill time. `flat` has no documented formula and errors. The maker coefficients are unconfirmed defaults: the fee-schedule page is behind a bot check, so a person must verify them in a browser before release.
 
 ## License
 

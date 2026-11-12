@@ -14,6 +14,7 @@ categories = ["api-bindings"]
 [features]
 default = []
 trading = []
+testing = ["trading"]
 
 [dependencies]
 base64 = "0.22"

@@ -45,6 +45,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::Credentials;
 use crate::client::{Client, ClientBuilder, DEMO_URL, PRODUCTION_URL, Request};
 use crate::error::{KalshiError, Result};
+use crate::pricing::{Count, Price};
 use crate::rate_limit::{BATCH_CANCEL_COST, DEFAULT_COST, Tier};
 use crate::types::{decimal_as_string, decimal_from_string, optional_decimal_from_string};
 
@@ -725,11 +726,9 @@ pub struct CreateOrderV2 {
     /// Side.
     pub side: OrderSide,
     /// Number of contracts, sent as a fixed-point string.
-    #[serde(serialize_with = "decimal_as_string")]
-    pub count: Decimal,
-    /// Limit price in dollars, sent as a fixed-point string.
-    #[serde(serialize_with = "decimal_as_string")]
-    pub price: Decimal,
+    pub count: Count,
+    /// Limit price in dollars (strictly between 0 and 1), sent as a fixed-point string.
+    pub price: Price,
     /// Time in force.
     pub time_in_force: TimeInForce,
     /// Self-trade prevention mode.
@@ -766,8 +765,8 @@ pub struct CreateOrderV2 {
 pub struct OrderBuilder {
     ticker: String,
     side: OrderSide,
-    count: Decimal,
-    price: Decimal,
+    count: Count,
+    price: Price,
     time_in_force: TimeInForce,
     self_trade_prevention: SelfTradePrevention,
     client_order_id: Option<Option<String>>,
@@ -780,13 +779,14 @@ pub struct OrderBuilder {
 }
 
 impl OrderBuilder {
-    /// Starts a builder with the required fields: market ticker, side, contract count, limit
-    /// price, time in force, and self-trade prevention mode.
+    /// Starts a builder with the required fields: market ticker, side, contract count
+    /// ([`Count`]), limit price in dollars ([`Price`], strictly between 0 and 1), time in
+    /// force, and self-trade prevention mode.
     pub fn new(
         ticker: impl Into<String>,
         side: OrderSide,
-        count: Decimal,
-        price: Decimal,
+        count: Count,
+        price: Price,
         time_in_force: TimeInForce,
         self_trade_prevention: SelfTradePrevention,
     ) -> Self {
