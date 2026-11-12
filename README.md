@@ -69,3 +69,17 @@ Pure helpers that make no network calls:
 ## License
 
 MIT
+
+## Demo integration tests (opt-in)
+
+Tests in `tests/demo_read.rs` and `tests/demo_trading.rs` call Kalshi's demo environment. They are
+`#[ignore]`d, so a plain `cargo test` makes no network call.
+
+```sh
+cargo test --all-features -- --ignored
+```
+
+The order test (place, amend, cancel) needs demo credentials: `KALSHI_API_KEY_ID` and
+`KALSHI_PRIVATE_KEY_PATH`. Without them it prints `SKIPPED` and returns. Every demo test builds its
+client from `KALSHI_DEMO_URL` (default: the demo URL) and panics if that URL is a production URL
+or not a demo host.
