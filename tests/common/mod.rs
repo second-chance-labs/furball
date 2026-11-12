@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod demo;
+
 use std::sync::OnceLock;
 use std::time::Duration;
 
