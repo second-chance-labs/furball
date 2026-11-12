@@ -31,7 +31,9 @@ fn optional_decimal_from_number<'de, D: Deserializer<'de>>(
 }
 
 /// Decodes a fixed-point decimal string into a [`Decimal`].
-fn decimal_from_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Decimal, D::Error> {
+pub(crate) fn decimal_from_string<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Decimal, D::Error> {
     let text = String::deserialize(deserializer)?;
     text.parse().map_err(serde::de::Error::custom)
 }
@@ -928,14 +930,6 @@ pub struct EndpointCost {
 fn tier_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Tier>, D::Error> {
     let name = String::deserialize(deserializer)?;
     Ok(Tier::from_name(&name))
-}
-
-/// Kalshi's order, RFQ and quote endpoints carry counts and prices as fixed-point strings.
-pub(crate) fn decimal_from_string<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<Decimal, D::Error> {
-    let text = String::deserialize(deserializer)?;
-    text.parse().map_err(serde::de::Error::custom)
 }
 
 pub(crate) fn optional_decimal_from_string<'de, D: serde::Deserializer<'de>>(
