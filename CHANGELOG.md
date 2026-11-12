@@ -16,7 +16,6 @@ breaking change.
   production, `dry_run` and a process-global `halt()` kill switch.
 - `testing` feature: in-process `FakeExchange`.
 - Fee calculator, order book helpers, position math, and validated `Price` and `Count`.
-- GitHub Actions CI (format, clippy, tests on stable and the minimum supported Rust version, docs)
-  and a husky `pre-push` hook running the same checks.
+- Husky `pre-push` hook (`scripts/check.sh`): format, clippy, tests on stable and the minimum supported Rust version with default and all features, docs. No hosted CI.
 - Opt-in demo environment integration tests (`cargo test -- --ignored`).
 - Examples: read markets, poll candlesticks, compute a fee, place a demo order, fake exchange.

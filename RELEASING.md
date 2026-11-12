@@ -36,7 +36,7 @@ change it follows.
 
 ## Release checklist
 
-The maintainer publishes the crate; CI never has a crates.io token.
+The maintainer publishes the crate; no automation holds a crates.io token.
 
 1. `git switch main && git pull`, with a clean working tree.
 2. `./scripts/check.sh` passes.
@@ -46,7 +46,7 @@ The maintainer publishes the crate; CI never has a crates.io token.
 5. Set the new `version` in `Cargo.toml`; move `[Unreleased]` entries in `CHANGELOG.md` under a
    dated version heading and add a fresh empty `[Unreleased]`.
 6. `cargo publish --dry-run`, then inspect `cargo package --list`.
-7. Commit `chore(release): vX.Y.Z`, open a PR, wait for CI, merge (never squash).
+7. Commit `chore(release): vX.Y.Z`, open a PR, merge (never squash).
 8. `git tag vX.Y.Z && git push origin vX.Y.Z`.
 9. `cargo publish`.
 10. Confirm the crate and its docs.rs build at <https://docs.rs/furball>.

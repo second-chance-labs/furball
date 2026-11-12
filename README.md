@@ -73,7 +73,7 @@ Try strategies on `FakeExchange` first, then on demo, and only then consider pro
 | Place a demo order | `cargo run --example place_demo_order --features trading -- <market>` | demo credentials |
 | Fake exchange | `cargo run --example fake_exchange --features testing` | nothing |
 
-`cargo test` compiles every example whose features are enabled; CI runs it with default and all features.
+`cargo test` compiles every example whose features are enabled; the pre-push hook runs it with default and all features.
 
 ## Testing (opt-in)
 
