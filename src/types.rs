@@ -349,8 +349,8 @@ pub struct BatchCandlesticksResponse {
     pub markets: Vec<MarketCandlesticks>,
 }
 
-/// Which side the taker was positioned for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// A yes/no side of a market.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutcomeSide {
     /// Taker bought yes or sold no.
@@ -928,4 +928,29 @@ pub struct EndpointCost {
 fn tier_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Tier>, D::Error> {
     let name = String::deserialize(deserializer)?;
     Ok(Tier::from_name(&name))
+}
+
+/// Kalshi's order, RFQ and quote endpoints carry counts and prices as fixed-point strings.
+pub(crate) fn decimal_from_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Decimal, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    text.parse().map_err(serde::de::Error::custom)
+}
+
+pub(crate) fn optional_decimal_from_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Decimal>, D::Error> {
+    let wrapper: Option<String> = Deserialize::deserialize(deserializer)?;
+    wrapper
+        .map(|text| text.parse().map_err(serde::de::Error::custom))
+        .transpose()
+}
+
+#[cfg(feature = "trading")]
+pub(crate) fn decimal_as_string<S: serde::Serializer>(
+    value: &Decimal,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(&value.to_string())
 }

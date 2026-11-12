@@ -47,6 +47,7 @@ use crate::client::{Client, ClientBuilder, DEMO_URL, PRODUCTION_URL, Request};
 use crate::error::{KalshiError, Result};
 use crate::pricing::{Count, Price};
 use crate::rate_limit::{BATCH_CANCEL_COST, DEFAULT_COST, Tier};
+use crate::types::{decimal_as_string, decimal_from_string, optional_decimal_from_string};
 
 /// Global kill switch shared by every [`TradingClient`] in the process.
 static HALTED: AtomicBool = AtomicBool::new(false);
@@ -175,7 +176,7 @@ impl TradingClientBuilder {
 /// Cheap to clone; clones share the rate limiter. The kill switch is process-global.
 #[derive(Clone)]
 pub struct TradingClient {
-    client: Client,
+    pub(crate) client: Client,
     environment: Environment,
     dry_run: bool,
 }
@@ -554,7 +555,9 @@ impl TradingClient {
         self.write_empty(request, String::new(), None).await
     }
 
-    async fn write<T: DeserializeOwned>(
+    /// Sends a trading write and decodes the JSON response as `T`. Shared by the order and
+    /// communications write surfaces.
+    pub(crate) async fn write<T: DeserializeOwned>(
         &self,
         request: Request,
         ticker: String,
@@ -571,7 +574,7 @@ impl TradingClient {
     }
 
     /// Like [`Self::write`] for endpoints that answer with no body: the raw body is discarded.
-    async fn write_empty(
+    pub(crate) async fn write_empty(
         &self,
         request: Request,
         ticker: String,
@@ -876,7 +879,7 @@ impl OrderBuilder {
 }
 
 /// Token cost of a batch: the sum of its per-item costs, saturating on overflow.
-fn batch_cost(items: usize, per_item: u32) -> u32 {
+pub(crate) fn batch_cost(items: usize, per_item: u32) -> u32 {
     u32::try_from(items)
         .unwrap_or(u32::MAX)
         .saturating_mul(per_item)
@@ -897,30 +900,6 @@ fn random_client_order_id() -> String {
         hex[8..10].join(""),
         hex[10..16].join("")
     )
-}
-
-fn decimal_as_string<S: serde::Serializer>(
-    value: &Decimal,
-    serializer: S,
-) -> std::result::Result<S::Ok, S::Error> {
-    serializer.serialize_str(&value.to_string())
-}
-
-/// Kalshi's order endpoints carry counts and prices as fixed-point strings.
-fn decimal_from_string<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<Decimal, D::Error> {
-    let text = String::deserialize(deserializer)?;
-    text.parse().map_err(serde::de::Error::custom)
-}
-
-fn optional_decimal_from_string<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<Option<Decimal>, D::Error> {
-    let wrapper: Option<String> = Deserialize::deserialize(deserializer)?;
-    wrapper
-        .map(|text| text.parse().map_err(serde::de::Error::custom))
-        .transpose()
 }
 
 /// A created order, as returned by `POST /portfolio/events/orders`.

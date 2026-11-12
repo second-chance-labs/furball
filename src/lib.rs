@@ -36,6 +36,13 @@
 //!   rounding pipeline (trade fee rounded up to $0.000001, balance alignment, per-order
 //!   rebates in [`FeeAccumulator`]), and [`fee_in_force`] to resolve the fee type and
 //!   multiplier from a [`build_fee_schedule`] at the fill time.
+//! - RFQ and quote reads for negotiated trades: [`Client::get_rfq`], [`Client::list_rfqs`],
+//!   [`Client::get_quote`] and [`Client::list_quotes`]; their writes (create, delete, accept,
+//!   confirm) live on the trading surface, along with the RFQ batch writes that quote several
+//!   combos as one all-or-nothing unit.
+//! - Block trade proposals for large negotiated trades: the read is
+//!   [`Client::list_block_trade_proposals`], and the writes (propose, cancel, accept, reject)
+//!   live on the trading surface.
 //!
 //! ```text
 //! caller -> routing (cutoff cache) -> pagination -> send_text (bucket -> sign -> HTTP -> 429 retry)
@@ -43,6 +50,7 @@
 
 mod auth;
 mod client;
+mod communications;
 mod endpoints;
 mod error;
 mod fee_schedule;
@@ -67,6 +75,10 @@ pub use auth::{
 pub use client::{
     Client, ClientBuilder, DEMO_URL, MAX_ATTEMPTS, PRODUCTION_EXTERNAL_URL, PRODUCTION_URL, Request,
 };
+pub use communications::{
+    AcceptedSide, BlockTradeProposal, BlockTradeProposalFilter, BlockTradeProposalStatus,
+    MveSelectedLeg, Quote, QuoteFilter, QuoteStatus, Rfq, RfqFilter, RfqStatus,
+};
 pub use endpoints::{BATCH_CANDLESTICK_TICKERS, MarketFilter, MarketStatus, Period};
 pub use error::{KalshiError, Result};
 pub use fee_schedule::{FeeScheduleRow, build_fee_schedule};
@@ -85,6 +97,13 @@ pub use pricing::{Count, CountError, Price, PriceError};
 pub use rate_limit::{BATCH_CANCEL_COST, CF_BENCHMARKS_COST, DEFAULT_COST, GET_ORDER_COST, Tier};
 pub use routing::{Cutoff, TradeId};
 
+#[cfg(feature = "trading")]
+pub use communications::{
+    AcceptBlockTradeProposal, AcceptRfqBatch, AcceptedRfqBatch, CreatedBlockTradeProposal,
+    CreatedQuote, CreatedRfq, CreatedRfqBatchQuote, NewQuote, NewRfq, NewRfqBatch,
+    NewRfqBatchQuote, ProposeBlockTrade, RfqBatch, RfqBatchAcceptLimit, RfqBatchChild,
+    RfqBatchQuoteEntry, RfqBatchSize, RfqBatchStatus, RfqChildSize, RfqSize, TickerPair,
+};
 #[cfg(feature = "trading")]
 pub use trading::{
     AmendOrder, AmendedOrder, BatchCancelOrder, BatchCancelResult, BatchCreateResult,

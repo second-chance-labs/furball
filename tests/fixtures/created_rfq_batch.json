@@ -1,0 +1,46 @@
+{
+  "rfq_batch": {
+    "id": "0191f2c6-2c5d-8f3a-9e7b-4c8d6a0f1b23",
+    "creator_id": "comm-creator-abc",
+    "status": "open",
+    "created_ts": "2025-02-11T10:00:00Z",
+    "rfqs": [
+      {
+        "id": "0191f2c4-9a3b-7d1e-8c5f-2a6b4e8d9f01",
+        "creator_id": "comm-creator-abc",
+        "market_ticker": "KXAPRIL-25FEB-YES",
+        "contracts_fp": "1000.00",
+        "target_cost_dollars": "550.0000",
+        "target_cost_excludes_fees": false,
+        "status": "open",
+        "created_ts": "2025-02-11T10:00:00Z",
+        "updated_ts": "2025-02-11T10:00:05Z",
+        "rest_remainder": true,
+        "creator_subaccount": 1,
+        "creator_user_id": "user-creator-1",
+        "rfq_batch_id": "0191f2c6-2c5d-8f3a-9e7b-4c8d6a0f1b23",
+        "mve_collection_ticker": "KMVE-25"
+      },
+      {
+        "id": "0191f2c7-3d6e-9a4b-8f8c-5d9e7b1a2c34",
+        "creator_id": "comm-creator-abc",
+        "market_ticker": "KXAPRIL-25MAY-NO",
+        "contracts_fp": "1000.00",
+        "target_cost_dollars": "550.0000",
+        "target_cost_excludes_fees": false,
+        "status": "open",
+        "created_ts": "2025-02-11T10:00:00Z",
+        "updated_ts": "2025-02-11T10:00:05Z",
+        "rest_remainder": true,
+        "creator_subaccount": 1,
+        "creator_user_id": "user-creator-1",
+        "rfq_batch_id": "0191f2c6-2c5d-8f3a-9e7b-4c8d6a0f1b23",
+        "mve_collection_ticker": "KMVE-25"
+      }
+    ],
+    "updated_ts": "2025-02-11T10:00:05Z",
+    "client_batch_id": "cb-777",
+    "creator_user_id": "user-creator-1",
+    "creator_subaccount": 1
+  }
+}
