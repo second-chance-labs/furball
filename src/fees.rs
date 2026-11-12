@@ -174,18 +174,18 @@ pub fn fee_in_force(
         })?;
     let mut fee_type = series_row.fee_type.clone();
     let mut multiplier = series_row.fee_multiplier;
-    if let Some(event) = event {
-        if let Some(override_row) = rows.iter().find(|row| {
+    if let Some(event) = event
+        && let Some(override_row) = rows.iter().find(|row| {
             row.event_ticker.as_deref() == Some(event)
                 && row.series_ticker == series
                 && covers(row.effective_from, row.effective_to, at)
-        }) {
-            if let Some(override_fee_type) = &override_row.fee_type {
-                fee_type = Some(override_fee_type.clone());
-            }
-            if let Some(override_multiplier) = override_row.fee_multiplier {
-                multiplier = Some(override_multiplier);
-            }
+        })
+    {
+        if let Some(override_fee_type) = &override_row.fee_type {
+            fee_type = Some(override_fee_type.clone());
+        }
+        if let Some(override_multiplier) = override_row.fee_multiplier {
+            multiplier = Some(override_multiplier);
         }
     }
     match (fee_type, multiplier) {

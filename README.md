@@ -47,6 +47,34 @@ let client = furball::TradingClient::builder()
 - `dry_run(true)` validates and signs each write but returns `WriteOutcome::DryRun` instead of sending.
 - Every write attempt is logged at `info` (method, path, ticker, client order ID), never keys or signatures.
 
+### Safety model
+
+```text
+default build ──► Client only: no write method exists
+      │
+      └─ feature `trading` ──► TradingClient ──► demo URL by default
+                                    │
+                                    ├─ dry_run(true)        sign, never send
+                                    ├─ halt()               refuse every write
+                                    └─ Environment::Production + allow_real_money()
+                                                            the only path to real money
+```
+
+Both production opt-ins must be explicit and in code; no environment variable switches a client to production.
+Try strategies on `FakeExchange` first, then on demo, and only then consider production.
+
+## Examples
+
+| Example | Run | Needs |
+| --- | --- | --- |
+| Read markets | `cargo run --example read_markets -- KXHIGHNY` | network |
+| Poll candlesticks | `cargo run --example stream_candlesticks -- <series> <market>` | network |
+| Compute a fee | `cargo run --example compute_fee` | nothing |
+| Place a demo order | `cargo run --example place_demo_order --features trading -- <market>` | demo credentials |
+| Fake exchange | `cargo run --example fake_exchange --features testing` | nothing |
+
+`cargo test` compiles every example whose features are enabled; the pre-push hook runs it with default and all features.
+
 ## Testing (opt-in)
 
 `furball::testing::FakeExchange` (behind the `testing` cargo feature, which enables `trading`) is an in-process fake exchange for testing strategies without Kalshi: price-and-time priority matching for limit orders (good-till-canceled, immediate-or-cancel, fill-or-kill), fills at the resting price, fees from `FeeCalculator` with a per-order accumulator, and tracked balance, positions, realized P&L and settlements. The test controls the clock, injects counterparty liquidity and market data, and settles markets. Its module docs carry a worked strategy example.
@@ -69,3 +97,17 @@ Pure helpers that make no network calls:
 ## License
 
 MIT
+
+## Demo integration tests (opt-in)
+
+Tests in `tests/demo_read.rs` and `tests/demo_trading.rs` call Kalshi's demo environment. They are
+`#[ignore]`d, so a plain `cargo test` makes no network call.
+
+```sh
+cargo test --all-features -- --ignored
+```
+
+The order test (place, amend, cancel) needs demo credentials: `KALSHI_API_KEY_ID` and
+`KALSHI_PRIVATE_KEY_PATH`. Without them it prints `SKIPPED` and returns. Every demo test builds its
+client from `KALSHI_DEMO_URL` (default: the demo URL) and panics if that URL is a production URL
+or not a demo host.

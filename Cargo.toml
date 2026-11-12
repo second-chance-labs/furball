@@ -3,7 +3,7 @@ name = "furball"
 author = "Oscar Gaske"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 description = "Read-only Rust SDK for Kalshi's Trade API v2: request signing, rate limiting, pagination, live/historical routing"
 repository = "https://github.com/second-chance-labs/furball"
@@ -38,3 +38,11 @@ url = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 wiremock = "0.6"
+
+[[example]]
+name = "place_demo_order"
+required-features = ["trading"]
+
+[[example]]
+name = "fake_exchange"
+required-features = ["testing"]
