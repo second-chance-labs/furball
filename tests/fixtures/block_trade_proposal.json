@@ -1,0 +1,23 @@
+{
+  "id": "btp-1000",
+  "proposer_user_id": "user-proposer-1",
+  "buyer_user_id": "user-buyer-1",
+  "buyer_subtrader_id": "st-buyer-1",
+  "seller_user_id": "user-seller-1",
+  "seller_subtrader_id": "st-seller-1",
+  "market_ticker": "KXAPRIL-25FEB-YES",
+  "price_centi_cents": 5400,
+  "centicount": 100000,
+  "maker_side": "yes",
+  "expiration_ts": "2025-02-11T12:00:00Z",
+  "status": "executed",
+  "created_ts": "2025-02-11T10:00:00Z",
+  "updated_ts": "2025-02-11T10:30:00Z",
+  "buyer_accepted": true,
+  "seller_accepted": true,
+  "buyer_accepted_ts": "2025-02-11T10:10:00Z",
+  "seller_accepted_ts": "2025-02-11T10:20:00Z",
+  "executed_ts": "2025-02-11T10:30:00Z",
+  "buyer_order_id": "o-block-buyer-1",
+  "seller_order_id": "o-block-seller-1"
+}
